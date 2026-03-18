@@ -59,6 +59,12 @@ node --test
 - `docs: ...`
 - `chore: ...`
 
+分支命名统一使用 `xx/xxx` 格式，推荐使用职责前缀 + 简短主题，例如：
+
+- `docs/update-readme`
+- `feat/agent-loop`
+- `fix/context-builder`
+
 PR 说明至少包含：
 
 - 改动目的
