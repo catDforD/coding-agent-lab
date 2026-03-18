@@ -1,0 +1,4 @@
+interface:
+  display_name: "Study Coding Agents"
+  short_description: "Research coding-agent designs and study workflows"
+  default_prompt: "Use $study-coding-agents to research a coding-agent topic and produce Chinese study notes plus a minimal todo list."
