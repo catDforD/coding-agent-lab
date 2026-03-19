@@ -1,8 +1,16 @@
+"""Claude Code cleanroom CLI 入口。
+
+当前文件负责把命令行输入接到 session store，再把 session 交给最小 runtime。
+这次实现对应 todo 的“Phase 2 第 2 点”，把链路推进到:
+CLI 参数 -> session store -> gather/act/verify 主循环。
+"""
+
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
+from .runtime import run_core_loop
 from .session_store import SessionRecord, SessionStore
 
 
@@ -38,6 +46,11 @@ def workspace_root() -> Path:
 
 
 def create_or_resume_session(args: argparse.Namespace, store: SessionStore) -> tuple[str, SessionRecord]:
+    """把 CLI 输入折叠成一个可运行的 session。
+
+    这里仍然只处理“新建 / 继续 / 读取”三种入口分流。
+    更细的事件流和工具级恢复，会留到 Phase 2 第 3 点以后再展开。
+    """
     task = resolve_task(args.task)
 
     if args.session_id and args.continue_last:
@@ -68,6 +81,15 @@ def render_summary(status: str, record: SessionRecord) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """运行最小 Claude Code CLI。
+
+    关键代码链:
+    CLI 参数 -> session store -> runtime.run_core_loop -> 终端摘要输出
+
+    对应《claude-code-study.md》的 4. 核心运行循环。
+    当前故意只跑一轮 gather -> act -> verify，不在这里提前接入复杂 planning、
+    统一事件流或真实工具执行。
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     store = SessionStore.from_environment(workspace_root())
@@ -77,7 +99,6 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
-    # 这里先只做“接收任务 + 维护 session”的 CLI 入口。
-    # gather -> act -> verify 主循环留给下一条 todo 实现，避免这一阶段把边界做散。
-    print(render_summary(status, record))
+    loop_result = run_core_loop(record, workspace_root())
+    print("\n".join([render_summary(status, record), loop_result.render_summary()]))
     return 0

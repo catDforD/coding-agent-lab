@@ -72,14 +72,32 @@ reproductions/claude-code/
 
 ### CLI 入口
 
-目前已经落了一个最小 CLI 入口，对应 `docs/claude-code/claude-code-todo.md` 的 “Phase 2 第 1 点”:
+目前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 2` 前两点落成一个最小骨架:
 - 能接收用户任务文本
 - 创建新的 `session id`
 - 把 session 保存到项目内的 `.claude-code/sessions/`
 - 支持通过 `--continue-last` 继续最近一次会话
 - 支持通过 `--session-id` 读取指定会话
+- 在创建或恢复 session 后，立刻跑一轮最小 `gather -> act -> verify` 主循环
+- 当前会把 gather 摘要、行动策略和 verify 结果打印到终端
 
-这一步故意还没有接模型，也没有实现 `gather -> act -> verify` 主循环。原因是学习文档“4. 核心运行循环”和“9.1 第一阶段必须有”虽然要求 CLI 主循环存在，但当前这条 todo 只要求先把入口和 session resume 机制钉住。
+这里仍然故意不接真实模型，也不提前引入统一事件流。这样做是为了先把学习文档“4. 核心运行循环”里的节拍显式化，再把“5.3 Memory / Context”和工具层条目逐步接上。
+
+### 当前主循环边界
+
+当前实现的关键代码链是:
+
+```text
+CLI 参数 -> session store -> runtime.gather_context
+-> runtime.act_on_context -> runtime.verify_action -> 终端摘要输出
+```
+
+最小边界如下:
+- `gather`: 只从 session 中提取最近任务和工作目录信息
+- `act`: 只生成一个最小行动结论，不做复杂 planning
+- `verify`: 只验证这一轮是否产出了可继续的下一步，不等同于真正的测试验证
+
+这样收口，是为了和学习文档“4. 核心运行循环”保持一致，同时不抢跑 todo 里后面的“统一事件流”和“接入最小工具集”。
 
 ### 运行方式
 
@@ -92,6 +110,7 @@ python3 -m claude_code --session-id <session-id>
 ```
 
 CLI 会输出当前状态、`session_id`、任务数量和最近一次任务文本。
+同时会输出本轮 runtime 的 gather、act、verify 摘要。
 
 ### 测试命令
 

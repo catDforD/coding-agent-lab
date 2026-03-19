@@ -32,6 +32,9 @@ class CliEntryTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("status: created", result.stdout)
             self.assertIn("task_count: 1", result.stdout)
+            self.assertIn("loop_phases: gather -> act -> verify", result.stdout)
+            self.assertIn("verify_status: loop-ready", result.stdout)
+            self.assertIn("act_strategy: change-code", result.stdout)
 
             latest_session_path = Path(tmp_dir) / "latest_session.txt"
             session_id = latest_session_path.read_text(encoding="utf-8").strip()
@@ -57,6 +60,7 @@ class CliEntryTest(unittest.TestCase):
             self.assertIn("status: resumed", second.stdout)
             self.assertIn("task_count: 2", second.stdout)
             self.assertIn("latest_task: 补充约束", second.stdout)
+            self.assertIn("act_strategy: change-code", second.stdout)
 
     def test_load_existing_session_without_new_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -70,6 +74,7 @@ class CliEntryTest(unittest.TestCase):
             self.assertEqual(loaded.returncode, 0, loaded.stderr)
             self.assertIn("status: loaded", loaded.stdout)
             self.assertIn("task_count: 1", loaded.stdout)
+            self.assertIn("verify_status: loop-ready", loaded.stdout)
 
 
 if __name__ == "__main__":
