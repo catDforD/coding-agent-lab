@@ -72,32 +72,53 @@ reproductions/claude-code/
 
 ### CLI 入口
 
-目前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 2` 前两点落成一个最小骨架:
+目前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 2` 前三点落成一个最小骨架:
 - 能接收用户任务文本
 - 创建新的 `session id`
 - 把 session 保存到项目内的 `.claude-code/sessions/`
 - 支持通过 `--continue-last` 继续最近一次会话
 - 支持通过 `--session-id` 读取指定会话
 - 在创建或恢复 session 后，立刻跑一轮最小 `gather -> act -> verify` 主循环
-- 当前会把 gather 摘要、行动策略和 verify 结果打印到终端
+- 会把 `user_message`、`tool_call`、`tool_result`、`model_response` 四类最小事件落到 session JSON
+- 当前会把 gather 摘要、行动策略、事件写入结果和 verify 结果打印到终端
 
-这里仍然故意不接真实模型，也不提前引入统一事件流。这样做是为了先把学习文档“4. 核心运行循环”里的节拍显式化，再把“5.3 Memory / Context”和工具层条目逐步接上。
+这里仍然故意不接真实模型，也不提前引入真实工具集。这样做是为了先把学习文档“4. 核心运行循环”里的节拍和“5.3 Memory / Context”里的 session 事件结构显式化，再把工具层条目逐步接上。
 
 ### 当前主循环边界
 
 当前实现的关键代码链是:
 
 ```text
-CLI 参数 -> session store -> runtime.gather_context
--> runtime.act_on_context -> runtime.verify_action -> 终端摘要输出
+CLI 参数 -> session store.events -> runtime.gather_context
+-> runtime.act_on_context -> runtime.emit_loop_events
+-> session JSON / 终端摘要输出
 ```
 
 最小边界如下:
-- `gather`: 只从 session 中提取最近任务和工作目录信息
-- `act`: 只生成一个最小行动结论，不做复杂 planning
+- `gather`: 只从统一事件流里提取最近用户消息和工作目录信息
+- `act`: 只生成一个最小行动结论，并产出一个过渡态的 stub tool 调用
+- `emit events`: 把 `tool_call`、`tool_result`、`model_response` 追加回 session
 - `verify`: 只验证这一轮是否产出了可继续的下一步，不等同于真正的测试验证
 
-这样收口，是为了和学习文档“4. 核心运行循环”保持一致，同时不抢跑 todo 里后面的“统一事件流”和“接入最小工具集”。
+这样收口，是为了和学习文档“4. 核心运行循环”与“5.3 Memory / Context”保持一致，同时不抢跑 todo 里后面的“接入最小工具集”。
+
+### 当前事件流结构
+
+当前 session JSON 以 `events` 为主，事件最小外壳如下:
+
+```json
+{
+  "event_id": "uuid",
+  "kind": "user_message | tool_call | tool_result | model_response",
+  "created_at": "2026-03-19T00:00:00+00:00",
+  "payload": {}
+}
+```
+
+当前的取舍是:
+- 先保证四类核心事件已经统一落盘，给后续 context builder 和 compaction 留稳定输入。
+- 真实工具还没接入，所以 `tool_call` / `tool_result` 先由 `runtime.next_action_router` 这个 stub tool 承担。
+- 旧版只包含 `user_tasks` 的 session 仍可读取，重新保存时会自动迁移成 `events` 结构。
 
 ### 运行方式
 
@@ -109,8 +130,8 @@ python3 -m claude_code --continue-last "补充新的用户约束"
 python3 -m claude_code --session-id <session-id>
 ```
 
-CLI 会输出当前状态、`session_id`、任务数量和最近一次任务文本。
-同时会输出本轮 runtime 的 gather、act、verify 摘要。
+CLI 会输出当前状态、`session_id`、任务数量、事件数量和最近一次任务文本。
+同时会输出本轮 runtime 的 gather、act、event emission、verify 摘要。
 
 ### 测试命令
 
@@ -119,11 +140,12 @@ cd reproductions/claude-code
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-## 验证方式
+## 当前验证
 
-Phase 1 的这三点属于边界固定任务，当前验证标准不是“程序已经能运行”，而是:
-- 复现范围已经写清楚
-- cleanroom 原则已经固定
-- 第一阶段必做和后置能力已经明确列出
+这一步的验证标准是:
+- 新建 session 时，JSON 里已经以 `events` 落盘，而不是只写 `user_tasks`
+- 继续会话和只读加载会话时，仍能跑完一轮最小 `gather -> act -> verify`
+- 旧版只含 `user_tasks` 的 session 能自动迁移成统一事件流
 
-后续进入 Phase 2 时，再把这些边界落实为实际 CLI、runtime 和 tools 模块。
+当前仍然保留一个 cleanroom 过渡层: `runtime.next_action_router`。
+它不是为了冒充真实工具，而是先证明 session 已经能承载“模型判断 -> 工具调用 -> 工具结果 -> 模型响应”的结构化链路。下一步再把这层替换成 `read_file`、`search`、`edit`、`bash`、`git_status` 等真实工具。
