@@ -9,7 +9,7 @@
 
 ## Phase 2. 搭最小架构
 - [x] 建一个 CLI 入口，能接收任务、保存 session id，并支持继续上一次会话。见“4. 核心运行循环”和“9.1 第一阶段必须有”。落实见 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md) 的“当前已实现”和 [reproductions/claude-code/claude_code/cli.py](../../reproductions/claude-code/claude_code/cli.py)。
-- [ ] 实现 `gather -> act -> verify` 主循环，先不做复杂 planning。见“4. 核心运行循环”。
+- [x] 实现 `gather -> act -> verify` 主循环，先不做复杂 planning。见“4. 核心运行循环”。落实见 [reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py) 和 [reproductions/claude-code/claude_code/cli.py](../../reproductions/claude-code/claude_code/cli.py)。
 - [ ] 定义统一事件流结构，至少记录用户消息、模型响应、工具调用、工具结果。见“5.3 Memory / Context”和“9.1 第一阶段必须有”。
 - [ ] 接入最小工具集：`read_file`、`search`、`edit`、`bash`、`git_status`。见“5.1 Tool Use”和“9.1 第一阶段必须有”。
 
