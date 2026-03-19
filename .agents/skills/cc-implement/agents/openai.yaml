@@ -1,0 +1,7 @@
+interface:
+  display_name: "CC Implement"
+  short_description: "Implement one Claude Code todo item in Chinese style"
+  default_prompt: "Use $cc-implement to implement one specified item from docs/claude-code/claude-code-todo.md, for example: 请实现 claude-code-todo.md Phase 2 第 1 点。"
+
+policy:
+  allow_implicit_invocation: false

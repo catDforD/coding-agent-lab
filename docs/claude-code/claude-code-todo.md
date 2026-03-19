@@ -3,12 +3,12 @@
 关联文档: [Claude Code 学习文档](./claude-code-study.md)
 
 ## Phase 1. 补齐输入和边界
-- [ ] 确认这次复现只追求最小闭环，不追求完整 UI、完整插件市场和完整云端环境。见学习文档的“9. 可复现的最小子集”。
-- [ ] 先固定 cleanroom 原则：只依据公开行为和公开接口复现，不假设拿到了 Claude Code 内核源码。见“3.3 已证实事实与推断的边界”。
-- [ ] 列出第一阶段必须支持的工具和可以后置的能力。见“5.1 Tool Use”和“9.1 第一阶段必须有”。
+- [x] 确认这次复现只追求最小闭环，不追求完整 UI、完整插件市场和完整云端环境。见学习文档的“9. 可复现的最小子集”。落实见 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md) 的“Phase 1 范围”。
+- [x] 先固定 cleanroom 原则：只依据公开行为和公开接口复现，不假设拿到了 Claude Code 内核源码。见“3.3 已证实事实与推断的边界”。落实见 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md) 的“Cleanroom 原则”。
+- [x] 列出第一阶段必须支持的工具和可以后置的能力。见“5.1 Tool Use”和“9.1 第一阶段必须有”。落实见 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md) 的“第一阶段工具边界”。
 
 ## Phase 2. 搭最小架构
-- [ ] 建一个 CLI 入口，能接收任务、保存 session id，并支持继续上一次会话。见“4. 核心运行循环”和“9.1 第一阶段必须有”。
+- [x] 建一个 CLI 入口，能接收任务、保存 session id，并支持继续上一次会话。见“4. 核心运行循环”和“9.1 第一阶段必须有”。落实见 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md) 的“当前已实现”和 [reproductions/claude-code/claude_code/cli.py](../../reproductions/claude-code/claude_code/cli.py)。
 - [ ] 实现 `gather -> act -> verify` 主循环，先不做复杂 planning。见“4. 核心运行循环”。
 - [ ] 定义统一事件流结构，至少记录用户消息、模型响应、工具调用、工具结果。见“5.3 Memory / Context”和“9.1 第一阶段必须有”。
 - [ ] 接入最小工具集：`read_file`、`search`、`edit`、`bash`、`git_status`。见“5.1 Tool Use”和“9.1 第一阶段必须有”。
