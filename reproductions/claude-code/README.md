@@ -72,17 +72,18 @@ reproductions/claude-code/
 
 ### CLI 入口
 
-目前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 2` 前三点落成一个最小骨架:
+目前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 2` 前四点落成一个最小骨架:
 - 能接收用户任务文本
 - 创建新的 `session id`
 - 把 session 保存到项目内的 `.claude-code/sessions/`
 - 支持通过 `--continue-last` 继续最近一次会话
 - 支持通过 `--session-id` 读取指定会话
 - 在创建或恢复 session 后，立刻跑一轮最小 `gather -> act -> verify` 主循环
+- 会把任务文本解析成一个最小工具调用，并立刻执行 `read_file`、`search`、`edit`、`bash`、`git_status` 之一
 - 会把 `user_message`、`tool_call`、`tool_result`、`model_response` 四类最小事件落到 session JSON
-- 当前会把 gather 摘要、行动策略、事件写入结果和 verify 结果打印到终端
+- 当前会把 gather 摘要、行动策略、工具状态、事件写入结果和 verify 结果打印到终端
 
-这里仍然故意不接真实模型，也不提前引入真实工具集。这样做是为了先把学习文档“4. 核心运行循环”里的节拍和“5.3 Memory / Context”里的 session 事件结构显式化，再把工具层条目逐步接上。
+这里仍然故意不接真实模型。这样做是为了先把学习文档“4. 核心运行循环”里的节拍、“5.1 Tool Use”里的最小工具集和“5.3 Memory / Context”里的 session 事件结构显式化，再把更复杂的规则层、权限层和上下文层逐步接上。
 
 ### 当前主循环边界
 
@@ -90,17 +91,18 @@ reproductions/claude-code/
 
 ```text
 CLI 参数 -> session store.events -> runtime.gather_context
--> runtime.act_on_context -> runtime.emit_loop_events
+-> runtime.plan_tool_call -> runtime.execute_tool_call
+-> runtime.emit_loop_events
 -> session JSON / 终端摘要输出
 ```
 
 最小边界如下:
 - `gather`: 只从统一事件流里提取最近用户消息和工作目录信息
-- `act`: 只生成一个最小行动结论，并产出一个过渡态的 stub tool 调用
+- `act`: 先把任务文本折叠成一个最小工具调用，再立刻执行真实工具
 - `emit events`: 把 `tool_call`、`tool_result`、`model_response` 追加回 session
 - `verify`: 只验证这一轮是否产出了可继续的下一步，不等同于真正的测试验证
 
-这样收口，是为了和学习文档“4. 核心运行循环”与“5.3 Memory / Context”保持一致，同时不抢跑 todo 里后面的“接入最小工具集”。
+这样收口，是为了和学习文档“4. 核心运行循环”“5.1 Tool Use”“5.3 Memory / Context”保持一致，同时不抢跑 todo 里后面的权限 gate 和 checkpoint。
 
 ### 当前事件流结构
 
@@ -117,21 +119,45 @@ CLI 参数 -> session store.events -> runtime.gather_context
 
 当前的取舍是:
 - 先保证四类核心事件已经统一落盘，给后续 context builder 和 compaction 留稳定输入。
-- 真实工具还没接入，所以 `tool_call` / `tool_result` 先由 `runtime.next_action_router` 这个 stub tool 承担。
+- 真实工具已经接入，但仍然只支持一轮、单次、显式任务格式的最小调用。
 - 旧版只包含 `user_tasks` 的 session 仍可读取，重新保存时会自动迁移成 `events` 结构。
+
+### 当前最小任务格式
+
+因为这一步还没有真实模型决策层，所以 CLI 先支持一组显式任务格式来驱动最小工具层:
+
+```text
+read_file <path>
+search <query>
+edit <path> -- <old> -- <new>
+bash <command>
+git_status
+```
+
+也支持对应的中文前缀:
+- `读取文件 <path>`
+- `搜索 <query>`
+- `编辑 <path> -- <old> -- <new>`
+- `执行命令 <command>`
+- `查看 git 状态`
+
+如果任务暂时不符合这些格式，runtime 会先退回到一次 `search`，把它当成最小 gather 补充动作。
 
 ### 运行方式
 
 在 `reproductions/claude-code/` 目录运行:
 
 ```bash
-python3 -m claude_code "读取项目并准备最小复现"
-python3 -m claude_code --continue-last "补充新的用户约束"
+python3 -m claude_code read_file README.md
+python3 -m claude_code search SessionStore
+python3 -m claude_code "edit notes.md -- before -- after"
+python3 -m claude_code "bash python -m unittest"
+python3 -m claude_code git_status
 python3 -m claude_code --session-id <session-id>
 ```
 
 CLI 会输出当前状态、`session_id`、任务数量、事件数量和最近一次任务文本。
-同时会输出本轮 runtime 的 gather、act、event emission、verify 摘要。
+同时会输出本轮 runtime 的 gather、act、tool status、event emission、verify 摘要。
 
 ### 测试命令
 
@@ -145,7 +171,8 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 这一步的验证标准是:
 - 新建 session 时，JSON 里已经以 `events` 落盘，而不是只写 `user_tasks`
 - 继续会话和只读加载会话时，仍能跑完一轮最小 `gather -> act -> verify`
+- `read_file`、`search`、`edit`、`bash`、`git_status` 都能在临时 workspace 里形成真实 `tool_call` / `tool_result`
 - 旧版只含 `user_tasks` 的 session 能自动迁移成统一事件流
 
-当前仍然保留一个 cleanroom 过渡层: `runtime.next_action_router`。
-它不是为了冒充真实工具，而是先证明 session 已经能承载“模型判断 -> 工具调用 -> 工具结果 -> 模型响应”的结构化链路。下一步再把这层替换成 `read_file`、`search`、`edit`、`bash`、`git_status` 等真实工具。
+当前仍然保留一个 cleanroom 取舍: 任务规划还是基于显式规则，而不是真实模型决策。
+这样做不是为了冒充 Claude Code 的内部 planner，而是先把“模型判断位置 -> 工具调用 -> 工具结果 -> 模型响应”的结构化链路搭出来。下一步再继续补 `CLAUDE.md`/`MEMORY.md`、context builder 和 permission gate。

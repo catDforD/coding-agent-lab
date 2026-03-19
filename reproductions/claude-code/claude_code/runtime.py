@@ -1,21 +1,24 @@
 """Claude Code cleanroom 的最小 runtime。
 
-这个文件现在同时覆盖《claude-code-todo.md》里的:
+这个文件现在覆盖《claude-code-todo.md》里的:
 - Phase 2 第 2 点: `gather -> act -> verify` 主循环
 - Phase 2 第 3 点: 统一事件流结构
+- Phase 2 第 4 点: 接入最小工具集
 
-设计边界对应《claude-code-study.md》的 4. 核心运行循环 和 5.3 Memory / Context:
-- 先把三段循环显式化，证明 CLI 已经不只是“存 session”
+设计边界对应《claude-code-study.md》的 4. 核心运行循环、5.1 Tool Use、5.3 Memory / Context:
+- 把 gather / act / verify 三段循环显式化，证明 CLI 已经不只是“存 session”
 - 用统一事件流记录本轮的模型与工具观察，给后续 context builder 留稳定接口
-- 仍然不提前实现真实工具集，避免抢跑下一个 todo 条目
+- 先接入最小真实工具，但不提前实现更复杂的 planning、permission gate 和 checkpoint
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .session_store import SessionEvent, SessionRecord, USER_MESSAGE
+from .tools import ToolCall, ToolExecutionResult, execute_tool_call, plan_tool_call
 
 
 @dataclass
@@ -31,8 +34,9 @@ class ActPhaseResult:
     assistant_message: str
     next_action: str
     tool_name: str
-    tool_input: dict[str, str]
-    tool_output: dict[str, str]
+    tool_input: dict[str, Any]
+    tool_output: dict[str, Any]
+    tool_status: str
     summary: str
 
 
@@ -57,6 +61,7 @@ class LoopResult:
                 f"gather_summary: {self.gather.summary}",
                 f"act_strategy: {self.act.strategy}",
                 f"act_tool_name: {self.act.tool_name}",
+                f"act_tool_status: {self.act.tool_status}",
                 f"act_next_action: {self.act.next_action}",
                 f"verify_status: {self.verify.status}",
                 f"verify_summary: {self.verify.summary}",
@@ -88,59 +93,31 @@ def gather_context(record: SessionRecord, workspace_root: Path) -> GatherPhaseRe
     )
 
 
-def _choose_strategy(latest_task: str) -> tuple[str, str]:
-    normalized = latest_task.strip()
-    read_keywords = ("解释", "阅读", "查看", "梳理", "总结", "分析")
-    write_keywords = ("修复", "修改", "重构", "补充", "实现")
-
-    if any(keyword in normalized for keyword in read_keywords):
-        return (
-            "inspect-code",
-            "先读取相关文件并整理关键代码链，再决定是否需要进一步动作",
-        )
-
-    if any(keyword in normalized for keyword in write_keywords):
-        return (
-            "change-code",
-            "先定位相关文件，再进入修改和验证步骤",
-        )
-
-    return (
-        "general-task",
-        "先补足任务上下文，再决定是偏只读分析还是偏写入执行",
-    )
-
-
-def act_on_context(gathered: GatherPhaseResult) -> ActPhaseResult:
+def act_on_context(gathered: GatherPhaseResult, workspace_root: Path) -> ActPhaseResult:
     """根据 gather 结果产出当前这一轮的行动结论。
 
-    按学习文档“4. 核心运行循环”的结论，这里需要有一个明确的“下一步要做什么”。
-    但这次只做最小版本，所以先用轻量规则给出行动方向，而不是提前引入复杂 planning。
+    按学习文档“4. 核心运行循环”和“5.1 Tool Use”的结论，act 阶段需要
+    真正落到一个结构化工具调用上，而不只是给出抽象下一步。
 
-    为了先把统一事件流跑起来，这里显式产出一对最小工具事件:
-    `runtime.next_action_router` 的调用与结果。
-    它不是 Phase 2 第 4 点里的真实工具，而是一个 cleanroom 过渡层，
-    用来证明 session 已经能承载“模型 -> 工具 -> 结果”的结构化链路。
+    当前仍然保持最小版本:
+    - 先由轻量规则把任务文本解析成一个工具调用
+    - 再立刻执行这个工具
+    - 把结果折叠回统一事件流
+
+    这样可以先证明最小工具集已经进入 Claude Code cleanroom 的主循环，
+    后续再把“谁来决定调用哪个工具”替换成更真实的模型决策层。
     """
-    strategy, next_action = _choose_strategy(gathered.latest_task)
-    tool_name = "runtime.next_action_router"
-    tool_input = {"latest_task": gathered.latest_task}
-    tool_output = {
-        "strategy": strategy,
-        "next_action": next_action,
-    }
-    assistant_message = (
-        f"已接收任务“{gathered.latest_task}”。"
-        f"当前最小 runtime 判定下一步应当：{next_action}。"
-    )
-    summary = f"selected {strategy} for the latest task via {tool_name}"
+    planned_call: ToolCall = plan_tool_call(gathered.latest_task)
+    executed: ToolExecutionResult = execute_tool_call(planned_call, workspace_root)
+    summary = f"executed {planned_call.tool_name} with strategy {planned_call.strategy}"
     return ActPhaseResult(
-        strategy=strategy,
-        assistant_message=assistant_message,
-        next_action=next_action,
-        tool_name=tool_name,
-        tool_input=tool_input,
-        tool_output=tool_output,
+        strategy=planned_call.strategy,
+        assistant_message=executed.assistant_message,
+        next_action=planned_call.next_action,
+        tool_name=planned_call.tool_name,
+        tool_input=planned_call.tool_input,
+        tool_output=executed.tool_output,
+        tool_status=executed.status,
         summary=summary,
     )
 
@@ -155,13 +132,18 @@ def verify_action(gathered: GatherPhaseResult, acted: ActPhaseResult) -> VerifyP
 
     这还是最小 cleanroom 验证，不等同于后续“重新跑测试 / 检查 git diff”的强验证。
     """
-    is_ready = bool(gathered.latest_task.strip()) and bool(acted.next_action.strip()) and bool(acted.tool_name.strip())
+    is_ready = (
+        bool(gathered.latest_task.strip())
+        and bool(acted.next_action.strip())
+        and bool(acted.tool_name.strip())
+        and bool(acted.tool_status.strip())
+    )
     if is_ready:
         return VerifyPhaseResult(
-            status="loop-ready",
+            status="loop-ready" if acted.tool_status == "ok" else "loop-needs-attention",
             summary=(
-                "completed one minimal runtime pass; session now records model and tool events, "
-                "and the next todo can swap the stub tool for real tools"
+                "completed one minimal runtime pass with a real tool call; session now records tool input and output, "
+                "and later phases can layer permission gate, checkpoint and richer context on top"
             ),
         )
 
@@ -185,7 +167,7 @@ def emit_loop_events(record: SessionRecord, acted: ActPhaseResult) -> list[Sessi
         record.add_tool_call(tool_name=acted.tool_name, tool_input=acted.tool_input),
         record.add_tool_result(
             tool_name=acted.tool_name,
-            status="ok",
+            status=acted.tool_status,
             tool_output=acted.tool_output,
         ),
         record.add_model_response(
@@ -201,11 +183,11 @@ def run_core_loop(record: SessionRecord, workspace_root: Path) -> LoopResult:
     """执行一轮最小 gather -> act -> verify 主循环。
 
     这里故意只跑一轮，不做自动多轮迭代:
-    - 先把 Claude Code 的核心节拍搭出来
-    - 再在后续条目中逐步把 stub tool 换成真实工具执行和更强验证
+    - 先把 Claude Code 的核心节拍和最小工具执行链搭出来
+    - 再在后续条目中逐步补 permission gate、checkpoint 和更强验证
     """
     gathered = gather_context(record, workspace_root)
-    acted = act_on_context(gathered)
+    acted = act_on_context(gathered, workspace_root)
     verified = verify_action(gathered, acted)
     emitted_events = emit_loop_events(record, acted)
     return LoopResult(

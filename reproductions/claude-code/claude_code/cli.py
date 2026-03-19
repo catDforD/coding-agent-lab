@@ -1,13 +1,14 @@
 """Claude Code cleanroom CLI 入口。
 
 当前文件负责把命令行输入接到 session store，再把 session 交给最小 runtime。
-这次实现对应 todo 的“Phase 2 第 2-3 点”，把链路推进到:
-CLI 参数 -> session store -> gather/act/verify 主循环 -> 统一事件流落盘。
+这次实现对应 todo 的“Phase 2 第 2-4 点”，把链路推进到:
+CLI 参数 -> session store -> gather/act/verify 主循环 -> 最小工具执行 -> 统一事件流落盘。
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from .runtime import run_core_loop
@@ -42,7 +43,15 @@ def resolve_task(raw_task: list[str]) -> str | None:
 
 
 def workspace_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    """返回当前 Claude Code cleanroom 要操作的 workspace 根目录。
+
+    对应学习文档“6.1 执行环境”的结论，这里不要把 workspace 写死成包目录。
+    默认跟随当前工作目录，测试或外部调用时也可以通过环境变量覆盖。
+    """
+    override = os.environ.get("CLAUDE_CODE_WORKSPACE_ROOT")
+    if override:
+        return Path(override).resolve()
+    return Path.cwd()
 
 
 def create_or_resume_session(args: argparse.Namespace, store: SessionStore) -> tuple[str, SessionRecord]:
@@ -87,9 +96,10 @@ def main(argv: list[str] | None = None) -> int:
     关键代码链:
     CLI 参数 -> session store -> runtime.run_core_loop -> 终端摘要输出
 
-    对应《claude-code-study.md》的 4. 核心运行循环。
-    当前故意只跑一轮 gather -> act -> verify。
-    这一步已经把统一事件流落进 session，但仍然不提前接入复杂 planning 或真实工具执行。
+    对应《claude-code-study.md》的 4. 核心运行循环 和 5.1 Tool Use。
+    当前故意只跑一轮 gather -> act -> verify，并只接最小工具集。
+    这一步已经把真实工具调用写进统一事件流，但仍然不提前接入复杂 planning、
+    permission gate 或 checkpoint。
     """
     parser = build_parser()
     args = parser.parse_args(argv)
