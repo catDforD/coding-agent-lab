@@ -1,13 +1,14 @@
 """Claude Code cleanroom CLI 入口。
 
 当前文件负责把命令行输入接到 session store，再把 session 交给最小 runtime。
-这次实现对应 todo 的“Phase 2 第 2 点”，把链路推进到:
-CLI 参数 -> session store -> gather/act/verify 主循环。
+这次实现对应 todo 的“Phase 2 第 2-4 点”，把链路推进到:
+CLI 参数 -> session store -> gather/act/verify 主循环 -> 最小工具执行 -> 统一事件流落盘。
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from .runtime import run_core_loop
@@ -42,14 +43,22 @@ def resolve_task(raw_task: list[str]) -> str | None:
 
 
 def workspace_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    """返回当前 Claude Code cleanroom 要操作的 workspace 根目录。
+
+    对应学习文档“6.1 执行环境”的结论，这里不要把 workspace 写死成包目录。
+    默认跟随当前工作目录，测试或外部调用时也可以通过环境变量覆盖。
+    """
+    override = os.environ.get("CLAUDE_CODE_WORKSPACE_ROOT")
+    if override:
+        return Path(override).resolve()
+    return Path.cwd()
 
 
 def create_or_resume_session(args: argparse.Namespace, store: SessionStore) -> tuple[str, SessionRecord]:
     """把 CLI 输入折叠成一个可运行的 session。
 
     这里仍然只处理“新建 / 继续 / 读取”三种入口分流。
-    更细的事件流和工具级恢复，会留到 Phase 2 第 3 点以后再展开。
+    更细的工具恢复和更长链路的会话编排，会留到后续 Phase 再展开。
     """
     task = resolve_task(args.task)
 
@@ -75,6 +84,7 @@ def render_summary(status: str, record: SessionRecord) -> str:
             f"status: {status}",
             f"session_id: {record.session_id}",
             f"task_count: {len(record.user_tasks)}",
+            f"event_count: {len(record.events)}",
             f"latest_task: {latest_task}",
         ]
     )
@@ -86,9 +96,10 @@ def main(argv: list[str] | None = None) -> int:
     关键代码链:
     CLI 参数 -> session store -> runtime.run_core_loop -> 终端摘要输出
 
-    对应《claude-code-study.md》的 4. 核心运行循环。
-    当前故意只跑一轮 gather -> act -> verify，不在这里提前接入复杂 planning、
-    统一事件流或真实工具执行。
+    对应《claude-code-study.md》的 4. 核心运行循环 和 5.1 Tool Use。
+    当前故意只跑一轮 gather -> act -> verify，并只接最小工具集。
+    这一步已经把真实工具调用写进统一事件流，但仍然不提前接入复杂 planning、
+    permission gate 或 checkpoint。
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -100,5 +111,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     loop_result = run_core_loop(record, workspace_root())
+    store.save(record)
     print("\n".join([render_summary(status, record), loop_result.render_summary()]))
     return 0
