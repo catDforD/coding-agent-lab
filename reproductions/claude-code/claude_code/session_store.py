@@ -136,23 +136,53 @@ class SessionRecord:
         *,
         strategy: str,
         next_action: str,
+        mode: str | None = None,
+        model: str | None = None,
+        finish_reason: str | None = None,
+        step_index: int | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> SessionEvent:
+        payload: dict[str, Any] = {
+            "content": content,
+            "strategy": strategy,
+            "next_action": next_action,
+        }
+        if mode is not None:
+            payload["mode"] = mode
+        if model is not None:
+            payload["model"] = model
+        if finish_reason is not None:
+            payload["finish_reason"] = finish_reason
+        if step_index is not None:
+            payload["step_index"] = step_index
+        if usage is not None:
+            payload["usage"] = usage
+
         return self.add_event(
             MODEL_RESPONSE,
-            {
-                "content": content,
-                "strategy": strategy,
-                "next_action": next_action,
-            },
+            payload,
         )
 
-    def add_tool_call(self, *, tool_name: str, tool_input: dict[str, Any]) -> SessionEvent:
+    def add_tool_call(
+        self,
+        *,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        step_index: int | None = None,
+        call_id: str | None = None,
+    ) -> SessionEvent:
+        payload: dict[str, Any] = {
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+        }
+        if step_index is not None:
+            payload["step_index"] = step_index
+        if call_id is not None:
+            payload["call_id"] = call_id
+
         return self.add_event(
             TOOL_CALL,
-            {
-                "tool_name": tool_name,
-                "tool_input": tool_input,
-            },
+            payload,
         )
 
     def add_tool_result(
@@ -161,14 +191,22 @@ class SessionRecord:
         tool_name: str,
         status: str,
         tool_output: dict[str, Any],
+        step_index: int | None = None,
+        call_id: str | None = None,
     ) -> SessionEvent:
+        payload: dict[str, Any] = {
+            "tool_name": tool_name,
+            "status": status,
+            "tool_output": tool_output,
+        }
+        if step_index is not None:
+            payload["step_index"] = step_index
+        if call_id is not None:
+            payload["call_id"] = call_id
+
         return self.add_event(
             TOOL_RESULT,
-            {
-                "tool_name": tool_name,
-                "status": status,
-                "tool_output": tool_output,
-            },
+            payload,
         )
 
     def recent_events(self, *, kind: str | None = None, limit: int | None = None) -> list[SessionEvent]:

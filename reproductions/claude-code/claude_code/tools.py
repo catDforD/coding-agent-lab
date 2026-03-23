@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+READ_ONLY_TOOL_NAMES = ("read_file", "search", "git_status")
+
 
 @dataclass
 class ToolCall:
@@ -148,6 +150,14 @@ def execute_tool_call(call: ToolCall, workspace_root: Path) -> ToolExecutionResu
     后续要加 permission gate、hooks、checkpoint，都应该围绕这里继续展开。
     """
 
+    return execute_named_tool(call.tool_name, call.tool_input, workspace_root)
+
+
+def execute_named_tool(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    workspace_root: Path,
+) -> ToolExecutionResult:
     handlers = {
         "read_file": _run_read_file,
         "search": _run_search,
@@ -155,24 +165,82 @@ def execute_tool_call(call: ToolCall, workspace_root: Path) -> ToolExecutionResu
         "bash": _run_bash,
         "git_status": _run_git_status,
     }
-    handler = handlers[call.tool_name]
+    if tool_name not in handlers:
+        raise ValueError(f"unsupported tool: {tool_name}")
+
+    handler = handlers[tool_name]
     try:
-        return handler(workspace_root, call.tool_input)
+        return handler(workspace_root, tool_input)
     except Exception as exc:  # noqa: BLE001 - 这里先统一折叠成最小 tool_result
         return ToolExecutionResult(
             status="error",
             tool_output={
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
-                "tool_name": call.tool_name,
-                "tool_input": call.tool_input,
+                "tool_name": tool_name,
+                "tool_input": tool_input,
             },
             assistant_message=(
-                f"工具 `{call.tool_name}` 执行失败：{type(exc).__name__}: {exc}。"
+                f"工具 `{tool_name}` 执行失败：{type(exc).__name__}: {exc}。"
                 "当前最小 runtime 已把失败写入事件流，后续可以继续补权限、重试和恢复策略。"
             ),
-            summary=f"tool {call.tool_name} failed with {type(exc).__name__}",
+            summary=f"tool {tool_name} failed with {type(exc).__name__}",
         )
+
+
+def live_tool_schemas() -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "name": "read_file",
+            "description": "Read one UTF-8 text file inside the current workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file, relative to the workspace root.",
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "search",
+            "description": "Search the workspace for a text query using ripgrep when available.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Plain text or regex query to search for in the workspace.",
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "git_status",
+            "description": "Collect `git status --short` from the current workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
+def tool_output_for_model(tool_name: str, result: ToolExecutionResult) -> dict[str, Any]:
+    return {
+        "tool_name": tool_name,
+        "status": result.status,
+        "output": result.tool_output,
+    }
 
 
 def _decode_inline_text(value: str) -> str:

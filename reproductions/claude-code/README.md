@@ -72,18 +72,20 @@ reproductions/claude-code/
 
 ### CLI 入口
 
-目前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 2` 前四点落成一个最小骨架:
+目前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 2` 前四点落成一个可运行骨架，并额外接上了真实 Responses API:
 - 能接收用户任务文本
 - 创建新的 `session id`
 - 把 session 保存到项目内的 `.claude-code/sessions/`
 - 支持通过 `--continue-last` 继续最近一次会话
 - 支持通过 `--session-id` 读取指定会话
-- 在创建或恢复 session 后，立刻跑一轮最小 `gather -> act -> verify` 主循环
-- 会把任务文本解析成一个最小工具调用，并立刻执行 `read_file`、`search`、`edit`、`bash`、`git_status` 之一
+- 默认会使用官方 `openai` SDK 的 Responses API 跑最小多轮只读代理
+- 保留 `--tool-direct` 调试入口，继续走显式工具命令
 - 会把 `user_message`、`tool_call`、`tool_result`、`model_response` 四类最小事件落到 session JSON
-- 当前会把 gather 摘要、行动策略、工具状态、事件写入结果和 verify 结果打印到终端
+- 当前会把 gather 摘要、模型模式、步数、工具执行情况、最终回答和 verify 结果打印到终端
 
-这里仍然故意不接真实模型。这样做是为了先把学习文档“4. 核心运行循环”里的节拍、“5.1 Tool Use”里的最小工具集和“5.3 Memory / Context”里的 session 事件结构显式化，再把更复杂的规则层、权限层和上下文层逐步接上。
+当前的 cleanroom 取舍是:
+- live 模式先只开放只读工具 `read_file`、`search`、`git_status`
+- `edit` 和 `bash` 仍然只在 `--tool-direct` 下可用，避免在 permission gate 落地前直接开放写入和命令执行
 
 ### 当前主循环边界
 
@@ -91,18 +93,20 @@ reproductions/claude-code/
 
 ```text
 CLI 参数 -> session store.events -> runtime.gather_context
--> runtime.plan_tool_call -> runtime.execute_tool_call
--> runtime.emit_loop_events
+-> live Responses agent / tool-direct planner
+-> tool execution
+-> session events / terminal summary
 -> session JSON / 终端摘要输出
 ```
 
 最小边界如下:
-- `gather`: 只从统一事件流里提取最近用户消息和工作目录信息
-- `act`: 先把任务文本折叠成一个最小工具调用，再立刻执行真实工具
-- `emit events`: 把 `tool_call`、`tool_result`、`model_response` 追加回 session
-- `verify`: 只验证这一轮是否产出了可继续的下一步，不等同于真正的测试验证
+- `gather`: 从统一事件流里提取最近用户消息，并把最近事件折叠成 resume transcript
+- `act/live`: 通过 Responses API 让模型决定是否调用只读工具，并在多轮 `function_call -> function_call_output` 后返回最终答案
+- `act/tool-direct`: 把任务文本折叠成显式工具调用，作为 deterministic/debug 入口
+- `emit events`: 把 live/tool-direct 产生的 `tool_call`、`tool_result`、`model_response` 追加回 session
+- `verify`: 区分 `completed`、`api-error`、`invalid-tool-call`、`max-steps-reached`
 
-这样收口，是为了和学习文档“4. 核心运行循环”“5.1 Tool Use”“5.3 Memory / Context”保持一致，同时不抢跑 todo 里后面的权限 gate 和 checkpoint。
+这一步已经能看到真实模型效果，但还没有做 `CLAUDE.md` / `MEMORY.md`、compaction、permission gate 和 checkpoint。
 
 ### 当前事件流结构
 
@@ -119,60 +123,105 @@ CLI 参数 -> session store.events -> runtime.gather_context
 
 当前的取舍是:
 - 先保证四类核心事件已经统一落盘，给后续 context builder 和 compaction 留稳定输入。
-- 真实工具已经接入，但仍然只支持一轮、单次、显式任务格式的最小调用。
+- live 模式会在 payload 里额外记录 `mode`、`model`、`finish_reason`、`step_index`、可选 `usage`。
 - 旧版只包含 `user_tasks` 的 session 仍可读取，重新保存时会自动迁移成 `events` 结构。
 
-### 当前最小任务格式
+### 配置与运行
 
-因为这一步还没有真实模型决策层，所以 CLI 先支持一组显式任务格式来驱动最小工具层:
+当前推荐用 `uv` 管理这个复现目录自己的虚拟环境和依赖。
 
-```text
-read_file <path>
-search <query>
-edit <path> -- <old> -- <new>
-bash <command>
-git_status
+先安装依赖:
+
+```bash
+cd reproductions/claude-code
+uv sync
 ```
 
-也支持对应的中文前缀:
-- `读取文件 <path>`
-- `搜索 <query>`
-- `编辑 <path> -- <old> -- <new>`
-- `执行命令 <command>`
-- `查看 git 状态`
+`uv` 会在当前目录下创建并维护 `.venv/`。如果你只想先确认工具链是否可用，也可以执行:
 
-如果任务暂时不符合这些格式，runtime 会先退回到一次 `search`，把它当成最小 gather 补充动作。
+```bash
+cd reproductions/claude-code
+uv run claude-code --help
+```
 
-### 运行方式
+然后配置 `reproductions/claude-code/.env`:
+
+```bash
+cp .env.example .env
+```
+
+`.env` 使用标准 OpenAI 风格变量:
+
+```bash
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=...
+OPENAI_MODEL=...
+```
+
+默认 live 模式会读取进程环境变量，若不存在再读取项目内 `.env`。
+
+如果你需要补充依赖，建议直接修改 `pyproject.toml` 后重新执行:
+
+```bash
+uv sync
+```
+
+#### Live 模式
 
 在 `reproductions/claude-code/` 目录运行:
 
 ```bash
-python3 -m claude_code read_file README.md
-python3 -m claude_code search SessionStore
-python3 -m claude_code "edit notes.md -- before -- after"
-python3 -m claude_code "bash python -m unittest"
-python3 -m claude_code git_status
-python3 -m claude_code --session-id <session-id>
+uv run claude-code "请解释 README.md 在这个复现里的作用"
+uv run claude-code "搜索 SessionStore，然后总结它现在负责什么"
+uv run claude-code --session-id <session-id>
+uv run claude-code --continue-last "继续总结刚才的结果"
 ```
 
 CLI 会输出当前状态、`session_id`、任务数量、事件数量和最近一次任务文本。
-同时会输出本轮 runtime 的 gather、act、tool status、event emission、verify 摘要。
+同时会输出本轮 runtime 的 `mode`、`model`、`step_count`、`executed_tools`、`finish_reason` 和最终回答。
+
+#### Tool-direct 调试模式
+
+如果要继续使用显式工具命令，传 `--tool-direct`:
+
+```bash
+uv run claude-code --tool-direct read_file README.md
+uv run claude-code --tool-direct search SessionStore
+uv run claude-code --tool-direct "edit notes.md -- before -- after"
+uv run claude-code --tool-direct "bash python -m unittest"
+uv run claude-code --tool-direct git_status
+```
+
+`--tool-direct` 仍支持下面这组显式任务格式:
+- `read_file <path>`
+- `search <query>`
+- `edit <path> -- <old> -- <new>`
+- `bash <command>`
+- `git_status`
 
 ### 测试命令
 
 ```bash
 cd reproductions/claude-code
-python3 -m unittest discover -s tests -p 'test_*.py'
+uv run python -m unittest discover -s tests -p 'test_*.py'
+```
+
+如果你临时不想走脚本入口，也可以继续用模块方式:
+
+```bash
+uv run python -m claude_code "搜索 SessionStore"
 ```
 
 ## 当前验证
 
 这一步的验证标准是:
 - 新建 session 时，JSON 里已经以 `events` 落盘，而不是只写 `user_tasks`
-- 继续会话和只读加载会话时，仍能跑完一轮最小 `gather -> act -> verify`
+- 继续会话和只读加载会话时，仍能跑完一轮 live 或 tool-direct `gather -> act -> verify`
 - `read_file`、`search`、`edit`、`bash`、`git_status` 都能在临时 workspace 里形成真实 `tool_call` / `tool_result`
+- fake live client 能覆盖“直接回答”“search -> read_file -> final answer”“未知工具”“达到 max steps”这几类循环
 - 旧版只含 `user_tasks` 的 session 能自动迁移成统一事件流
 
-当前仍然保留一个 cleanroom 取舍: 任务规划还是基于显式规则，而不是真实模型决策。
-这样做不是为了冒充 Claude Code 的内部 planner，而是先把“模型判断位置 -> 工具调用 -> 工具结果 -> 模型响应”的结构化链路搭出来。下一步再继续补 `CLAUDE.md`/`MEMORY.md`、context builder 和 permission gate。
+当前仍然保留几个明确边界:
+- live 模式还没有 `CLAUDE.md` / `MEMORY.md` / compaction。
+- live 模式不开放 `edit` 和 `bash`。
+- tool-direct 仍然是调试入口，不是最终的 Claude Code 风格交互。

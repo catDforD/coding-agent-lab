@@ -13,25 +13,24 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
 class CliEntryTest(unittest.TestCase):
-    """覆盖 Claude Code cleanroom 的最小工具闭环。
-
-    这些测试对应 `docs/claude-code/claude-code-todo.md` 的 Phase 2 第 4 点。
-    关键链路是:
-    CLI task -> runtime.plan_tool_call -> execute_tool_call -> session events
-
-    当前 deliberately 只验证最小工具集是否已经进入统一事件流，
-    不抢跑到后续 permission gate / checkpoint / compaction。
-    """
+    """覆盖 CLI 的 tool-direct 调试链和 live 配置边界。"""
 
     def run_cli(
         self,
         *args: str,
         state_dir: Path,
         workspace_root: Path,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["CLAUDE_CODE_STATE_DIR"] = str(state_dir)
         env["CLAUDE_CODE_WORKSPACE_ROOT"] = str(workspace_root)
+        env["CLAUDE_CODE_ENV_FILE"] = str(state_dir / "test.env")
+        env.pop("OPENAI_API_KEY", None)
+        env.pop("OPENAI_MODEL", None)
+        env.pop("OPENAI_BASE_URL", None)
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [sys.executable, "-m", "claude_code", *args],
             cwd=PROJECT_DIR,
@@ -67,6 +66,7 @@ class CliEntryTest(unittest.TestCase):
             self.make_workspace(workspace_root)
 
             result = self.run_cli(
+                "--tool-direct",
                 "read_file",
                 "notes.md",
                 state_dir=state_dir,
@@ -74,13 +74,13 @@ class CliEntryTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("status: created", result.stdout)
-            self.assertIn("act_tool_name: read_file", result.stdout)
-            self.assertIn("act_tool_status: ok", result.stdout)
+            self.assertIn("mode: tool-direct", result.stdout)
+            self.assertIn("executed_tools: read_file", result.stdout)
 
             payload = self.read_session_payload(state_dir)
             self.assertEqual(len(payload["events"]), 4)
             self.assertEqual(payload["events"][1]["payload"]["tool_name"], "read_file")
+            self.assertEqual(payload["events"][1]["payload"]["step_index"], 1)
             self.assertEqual(payload["events"][2]["payload"]["status"], "ok")
             self.assertEqual(payload["events"][2]["payload"]["tool_output"]["path"], "notes.md")
             self.assertIn("SessionStore lives here", payload["events"][2]["payload"]["tool_output"]["content"])
@@ -94,6 +94,7 @@ class CliEntryTest(unittest.TestCase):
             self.make_workspace(workspace_root)
 
             result = self.run_cli(
+                "--tool-direct",
                 "search",
                 "SessionStore",
                 state_dir=state_dir,
@@ -101,8 +102,7 @@ class CliEntryTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("act_tool_name: search", result.stdout)
-            self.assertIn("act_tool_status: ok", result.stdout)
+            self.assertIn("executed_tools: search", result.stdout)
 
             payload = self.read_session_payload(state_dir)
             tool_output = payload["events"][2]["payload"]["tool_output"]
@@ -119,14 +119,14 @@ class CliEntryTest(unittest.TestCase):
             self.make_workspace(workspace_root)
 
             result = self.run_cli(
+                "--tool-direct",
                 "edit src/sample.txt -- beta -- gamma",
                 state_dir=state_dir,
                 workspace_root=workspace_root,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("act_tool_name: edit", result.stdout)
-            self.assertIn("act_tool_status: ok", result.stdout)
+            self.assertIn("executed_tools: edit", result.stdout)
             self.assertEqual(
                 (workspace_root / "src" / "sample.txt").read_text(encoding="utf-8"),
                 "alpha\ngamma\n",
@@ -146,6 +146,7 @@ class CliEntryTest(unittest.TestCase):
             self.make_workspace(workspace_root)
 
             result = self.run_cli(
+                "--tool-direct",
                 "bash",
                 "printf ready",
                 state_dir=state_dir,
@@ -153,8 +154,7 @@ class CliEntryTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("act_tool_name: bash", result.stdout)
-            self.assertIn("act_tool_status: ok", result.stdout)
+            self.assertIn("executed_tools: bash", result.stdout)
 
             payload = self.read_session_payload(state_dir)
             tool_output = payload["events"][2]["payload"]["tool_output"]
@@ -172,14 +172,14 @@ class CliEntryTest(unittest.TestCase):
             (workspace_root / "new.txt").write_text("draft\n", encoding="utf-8")
 
             result = self.run_cli(
+                "--tool-direct",
                 "git_status",
                 state_dir=state_dir,
                 workspace_root=workspace_root,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("act_tool_name: git_status", result.stdout)
-            self.assertIn("act_tool_status: ok", result.stdout)
+            self.assertIn("executed_tools: git_status", result.stdout)
 
             payload = self.read_session_payload(state_dir)
             tool_output = payload["events"][2]["payload"]["tool_output"]
@@ -215,6 +215,7 @@ class CliEntryTest(unittest.TestCase):
             (state_dir / "latest_session.txt").write_text(session_id + "\n", encoding="utf-8")
 
             result = self.run_cli(
+                "--tool-direct",
                 "--session-id",
                 session_id,
                 state_dir=state_dir,
@@ -223,7 +224,7 @@ class CliEntryTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("status: loaded", result.stdout)
-            self.assertIn("act_tool_name: read_file", result.stdout)
+            self.assertIn("executed_tools: read_file", result.stdout)
 
             migrated = self.read_session_payload(state_dir)
             self.assertNotIn("user_tasks", migrated)
@@ -231,6 +232,23 @@ class CliEntryTest(unittest.TestCase):
                 [event["kind"] for event in migrated["events"]],
                 ["user_message", "tool_call", "tool_result", "model_response"],
             )
+
+    def test_live_mode_requires_openai_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            workspace_root = root / "workspace"
+            state_dir = root / "state"
+            workspace_root.mkdir()
+            self.make_workspace(workspace_root)
+
+            result = self.run_cli(
+                "请解释 notes.md",
+                state_dir=state_dir,
+                workspace_root=workspace_root,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("missing OPENAI_API_KEY", result.stderr)
 
 
 if __name__ == "__main__":

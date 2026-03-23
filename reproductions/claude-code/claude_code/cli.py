@@ -1,16 +1,14 @@
-"""Claude Code cleanroom CLI 入口。
-
-当前文件负责把命令行输入接到 session store，再把 session 交给最小 runtime。
-这次实现对应 todo 的“Phase 2 第 2-4 点”，把链路推进到:
-CLI 参数 -> session store -> gather/act/verify 主循环 -> 最小工具执行 -> 统一事件流落盘。
-"""
+"""Claude Code cleanroom CLI 入口。"""
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
+from .config import ConfigError, load_openai_settings
+from .model_client import LiveOpenAIClient, ModelClientError
 from .runtime import run_core_loop
 from .session_store import SessionRecord, SessionStore
 
@@ -34,6 +32,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Continue the latest saved session",
     )
+    parser.add_argument(
+        "--tool-direct",
+        action="store_true",
+        help="Use the deterministic direct tool path instead of the live Responses agent",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=6,
+        help="Maximum number of live agent steps before stopping",
+    )
     return parser
 
 
@@ -43,11 +52,6 @@ def resolve_task(raw_task: list[str]) -> str | None:
 
 
 def workspace_root() -> Path:
-    """返回当前 Claude Code cleanroom 要操作的 workspace 根目录。
-
-    对应学习文档“6.1 执行环境”的结论，这里不要把 workspace 写死成包目录。
-    默认跟随当前工作目录，测试或外部调用时也可以通过环境变量覆盖。
-    """
     override = os.environ.get("CLAUDE_CODE_WORKSPACE_ROOT")
     if override:
         return Path(override).resolve()
@@ -55,11 +59,6 @@ def workspace_root() -> Path:
 
 
 def create_or_resume_session(args: argparse.Namespace, store: SessionStore) -> tuple[str, SessionRecord]:
-    """把 CLI 输入折叠成一个可运行的 session。
-
-    这里仍然只处理“新建 / 继续 / 读取”三种入口分流。
-    更细的工具恢复和更长链路的会话编排，会留到后续 Phase 再展开。
-    """
     task = resolve_task(args.task)
 
     if args.session_id and args.continue_last:
@@ -91,18 +90,11 @@ def render_summary(status: str, record: SessionRecord) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """运行最小 Claude Code CLI。
-
-    关键代码链:
-    CLI 参数 -> session store -> runtime.run_core_loop -> 终端摘要输出
-
-    对应《claude-code-study.md》的 4. 核心运行循环 和 5.1 Tool Use。
-    当前故意只跑一轮 gather -> act -> verify，并只接最小工具集。
-    这一步已经把真实工具调用写进统一事件流，但仍然不提前接入复杂 planning、
-    permission gate 或 checkpoint。
-    """
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.max_steps <= 0:
+        parser.error("--max-steps must be greater than 0")
+
     store = SessionStore.from_environment(workspace_root())
 
     try:
@@ -110,7 +102,29 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
-    loop_result = run_core_loop(record, workspace_root())
+    model_client = None
+    if not args.tool_direct:
+        try:
+            settings = load_openai_settings()
+            model_client = LiveOpenAIClient(settings)
+        except (ConfigError, ModelClientError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    loop_result = run_core_loop(
+        record,
+        workspace_root(),
+        tool_direct=args.tool_direct,
+        max_steps=args.max_steps,
+        model_client=model_client,
+    )
     store.save(record)
     print("\n".join([render_summary(status, record), loop_result.render_summary()]))
+
+    if loop_result.verify.status == "completed":
+        return 0
+    if args.tool_direct and loop_result.verify.status == "loop-needs-attention":
+        return 1
+    if not args.tool_direct:
+        return 1
     return 0

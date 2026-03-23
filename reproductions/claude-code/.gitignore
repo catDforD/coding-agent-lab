@@ -1,1 +1,4 @@
 .claude-code/
+.venv/
+.env
+!.env.example
