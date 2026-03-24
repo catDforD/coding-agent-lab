@@ -2,3 +2,10 @@
 .venv/
 .env
 !.env.example
+ui/node_modules/
+ui/dist/
+ui/coverage/
+ui/*.tsbuildinfo
+ui/vite.config.js
+ui/vite.config.d.ts
+.runtime/

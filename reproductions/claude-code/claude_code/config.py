@@ -22,6 +22,13 @@ def reproduction_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def workspace_root() -> Path:
+    override = os.environ.get("CLAUDE_CODE_WORKSPACE_ROOT")
+    if override:
+        return Path(override).resolve()
+    return Path.cwd()
+
+
 def env_file_path() -> Path:
     override = os.environ.get("CLAUDE_CODE_ENV_FILE")
     if override:

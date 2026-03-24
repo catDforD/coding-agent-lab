@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-from pathlib import Path
 
-from .config import ConfigError, load_openai_settings
-from .model_client import LiveOpenAIClient, ModelClientError
-from .runtime import run_core_loop
-from .session_store import SessionRecord, SessionStore
+from .app_service import ClaudeCodeAppService, RuntimeUnavailableError
+from .session_store import SessionRecord
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,31 +45,22 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_task(raw_task: list[str]) -> str | None:
     task = " ".join(raw_task).strip()
     return task or None
-
-
-def workspace_root() -> Path:
-    override = os.environ.get("CLAUDE_CODE_WORKSPACE_ROOT")
-    if override:
-        return Path(override).resolve()
-    return Path.cwd()
-
-
-def create_or_resume_session(args: argparse.Namespace, store: SessionStore) -> tuple[str, SessionRecord]:
+def create_or_resume_session(args: argparse.Namespace, service: ClaudeCodeAppService) -> tuple[str, SessionRecord]:
     task = resolve_task(args.task)
 
     if args.session_id and args.continue_last:
         raise ValueError("cannot use --session-id and --continue-last together")
 
     if args.session_id or args.continue_last:
-        session_id = args.session_id or store.load_latest_session_id()
+        session_id = args.session_id or service.load_latest_session_id()
         if task is None:
-            return "loaded", store.load(session_id)
-        return "resumed", store.append_task(session_id, task)
+            return "loaded", service.get_session(session_id)
+        return "resumed", service.append_task(session_id, task)
 
     if task is None:
         raise ValueError("a task is required when creating a new session")
 
-    return "created", store.create(task)
+    return "created", service.create_session(task)
 
 
 def render_summary(status: str, record: SessionRecord) -> str:
@@ -95,30 +82,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_steps <= 0:
         parser.error("--max-steps must be greater than 0")
 
-    store = SessionStore.from_environment(workspace_root())
+    service = ClaudeCodeAppService.for_current_workspace()
 
     try:
-        status, record = create_or_resume_session(args, store)
+        status, record = create_or_resume_session(args, service)
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
-    model_client = None
-    if not args.tool_direct:
-        try:
-            settings = load_openai_settings()
-            model_client = LiveOpenAIClient(settings)
-        except (ConfigError, ModelClientError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+    try:
+        loop_result = service.run_turn(
+            record,
+            tool_direct=args.tool_direct,
+            max_steps=args.max_steps,
+        )
+    except RuntimeUnavailableError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
-    loop_result = run_core_loop(
-        record,
-        workspace_root(),
-        tool_direct=args.tool_direct,
-        max_steps=args.max_steps,
-        model_client=model_client,
-    )
-    store.save(record)
     print("\n".join([render_summary(status, record), loop_result.render_summary()]))
 
     if loop_result.verify.status == "completed":
