@@ -6,10 +6,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
 ]
 
 [project.scripts]
 claude-code = "claude_code.cli:main"
+claude-code-web = "claude_code.web:main"
 
 [build-system]
 requires = ["hatchling"]

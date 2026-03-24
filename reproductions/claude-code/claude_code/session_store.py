@@ -300,6 +300,18 @@ class SessionStore:
             raise FileNotFoundError("no previous session found")
         return self.latest_session_file.read_text(encoding="utf-8").strip()
 
+    def list_records(self) -> list[SessionRecord]:
+        if not self.sessions_dir.exists():
+            return []
+
+        records: list[SessionRecord] = []
+        for session_path in sorted(self.sessions_dir.glob("*.json")):
+            payload = json.loads(session_path.read_text(encoding="utf-8"))
+            records.append(SessionRecord.from_dict(payload))
+
+        records.sort(key=lambda record: record.updated_at, reverse=True)
+        return records
+
     def save(self, record: SessionRecord) -> None:
         self._ensure_dirs()
         session_path = self.sessions_dir / f"{record.session_id}.json"

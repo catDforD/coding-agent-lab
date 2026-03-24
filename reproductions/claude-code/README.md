@@ -17,6 +17,10 @@
 
 这样收缩范围，是因为学习文档“9. 可复现的最小子集”和“9.1 第一阶段必须有”都把重点放在 agent runtime、工具调用、事件流、权限门和 checkpoint，而不是产品壳层。
 
+更新:
+- 现在额外提供了一个基础 Web UI 工作台，用来观察和驱动当前 cleanroom runtime。
+- 这个 UI 仍然是最小前端壳层，不等于完整 Claude Code 产品界面。
+
 ## Cleanroom 原则
 
 本目录下的 Claude Code 复现遵循下面的 cleanroom 边界:
@@ -142,6 +146,7 @@ uv sync
 ```bash
 cd reproductions/claude-code
 uv run claude-code --help
+uv run claude-code-web
 ```
 
 然后配置 `reproductions/claude-code/.env`:
@@ -159,6 +164,74 @@ OPENAI_MODEL=...
 ```
 
 默认 live 模式会读取进程环境变量，若不存在再读取项目内 `.env`。
+
+### Web UI
+
+前端工作台放在 `reproductions/claude-code/ui/`，当前固定接入:
+- live 只读工具链
+- 历史 session 列表
+- 继续已有会话
+- 本轮 `gather -> act -> verify` 摘要和工具事件检查面板
+
+不包含:
+- `edit` / `bash` 写操作 UI
+- 真流式 token 输出
+- 文件树 / diff / IDE 编辑器
+
+推荐直接用一键脚本同时启动前后端:
+
+```bash
+cd reproductions/claude-code
+./scripts/dev_ui.sh
+```
+
+脚本会自动:
+- 执行 `uv sync`
+- 在缺少 `node_modules` 时执行 `npm install`
+- 默认回收占用 `8000` 和 `5173` 的旧进程
+- 启动 Python API
+- 启动 Vite 前端开发服务
+- 把日志写到 `reproductions/claude-code/.runtime/`
+
+默认固定端口:
+
+```bash
+cd reproductions/claude-code
+./scripts/dev_ui.sh
+```
+
+如果你不想让脚本自动关旧进程:
+
+```bash
+cd reproductions/claude-code
+KILL_CONFLICTING_PORTS=0 ./scripts/dev_ui.sh
+```
+
+如果你想改端口，也可以覆盖:
+
+```bash
+cd reproductions/claude-code
+BACKEND_PORT=8010 FRONTEND_PORT=5174 ./scripts/dev_ui.sh
+```
+
+如果你想分别启动，也可以继续用下面的手动方式。
+
+先启动 Python API:
+
+```bash
+cd reproductions/claude-code
+uv run claude-code-web
+```
+
+再单独启动前端开发服务:
+
+```bash
+cd reproductions/claude-code/ui
+npm install
+npm run dev
+```
+
+前端默认请求 `http://127.0.0.1:8000`。
 
 如果你需要补充依赖，建议直接修改 `pyproject.toml` 后重新执行:
 
@@ -204,6 +277,13 @@ uv run claude-code --tool-direct git_status
 ```bash
 cd reproductions/claude-code
 uv run python -m unittest discover -s tests -p 'test_*.py'
+```
+
+前端测试:
+
+```bash
+cd reproductions/claude-code/ui
+npm test
 ```
 
 如果你临时不想走脚本入口，也可以继续用模块方式:
