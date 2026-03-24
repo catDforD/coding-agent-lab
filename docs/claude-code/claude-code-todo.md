@@ -13,6 +13,10 @@
 - [x] 定义统一事件流结构，至少记录用户消息、模型响应、工具调用、工具结果。见“5.3 Memory / Context”和“9.1 第一阶段必须有”。落实见 [reproductions/claude-code/claude_code/session_store.py](../../reproductions/claude-code/claude_code/session_store.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py) 和 [reproductions/claude-code/tests/test_cli.py](../../reproductions/claude-code/tests/test_cli.py)。
 - [x] 接入最小工具集：`read_file`、`search`、`edit`、`bash`、`git_status`。见“5.1 Tool Use”和“9.1 第一阶段必须有”。落实见 [reproductions/claude-code/claude_code/tools.py](../../reproductions/claude-code/claude_code/tools.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py)、[reproductions/claude-code/claude_code/cli.py](../../reproductions/claude-code/claude_code/cli.py)、[reproductions/claude-code/tests/test_cli.py](../../reproductions/claude-code/tests/test_cli.py) 和 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md)。
 
+当前增量说明:
+- 已接入真实大模型 API，默认通过官方 `openai` SDK 的 Responses API 跑最小多轮只读代理。
+- `read_file`、`search`、`git_status` 已进入 live agent 工具集；`edit` 和 `bash` 仍保留在 `--tool-direct` 调试模式，等待 Phase 4 的 permission gate。
+
 ## Phase 3. 补上下文和规则层
 - [ ] 启动时加载项目 `CLAUDE.md`、用户级规则和一个简化版 `MEMORY.md`。见“5.3 Memory / Context”。
 - [ ] 设计 prompt/context builder，把会话历史、最近工具输出和规则文件拼成统一输入。见“3.1 官方可直接确认的高层结构”和“5.3 Memory / Context”。

@@ -1,42 +1,55 @@
-"""Claude Code cleanroom 的最小 runtime。
+"""Claude Code cleanroom runtime。
 
-这个文件现在覆盖《claude-code-todo.md》里的:
-- Phase 2 第 2 点: `gather -> act -> verify` 主循环
-- Phase 2 第 3 点: 统一事件流结构
-- Phase 2 第 4 点: 接入最小工具集
-
-设计边界对应《claude-code-study.md》的 4. 核心运行循环、5.1 Tool Use、5.3 Memory / Context:
-- 把 gather / act / verify 三段循环显式化，证明 CLI 已经不只是“存 session”
-- 用统一事件流记录本轮的模型与工具观察，给后续 context builder 留稳定接口
-- 先接入最小真实工具，但不提前实现更复杂的 planning、permission gate 和 checkpoint
+当前 runtime 同时支持两条路径:
+- live 模式: 使用 OpenAI Responses API 驱动最小多轮只读代理
+- tool-direct 模式: 继续保留 Phase 2 的显式工具调试入口
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .model_client import ModelClient, ModelClientError
 from .session_store import SessionEvent, SessionRecord, USER_MESSAGE
-from .tools import ToolCall, ToolExecutionResult, execute_tool_call, plan_tool_call
+from .tools import (
+    READ_ONLY_TOOL_NAMES,
+    ToolCall,
+    execute_named_tool,
+    execute_tool_call,
+    live_tool_schemas,
+    plan_tool_call,
+    tool_output_for_model,
+)
+
+
+LIVE_AGENT_PROMPT = """You are a Claude Code cleanroom reproduction agent running in a terminal.
+You may use only these read-only tools: read_file, search, git_status.
+Do not invent file contents or repository facts that you have not inspected.
+Use tools when you need concrete repo information; otherwise answer directly.
+Keep the final answer concise and useful for a terminal user."""
 
 
 @dataclass
 class GatherPhaseResult:
     latest_task: str
     recent_tasks: list[str]
+    resume_transcript: str
     summary: str
 
 
 @dataclass
 class ActPhaseResult:
+    mode: str
     strategy: str
-    assistant_message: str
-    next_action: str
-    tool_name: str
-    tool_input: dict[str, Any]
-    tool_output: dict[str, Any]
-    tool_status: str
+    model: str
+    step_count: int
+    executed_tools: list[str]
+    finish_reason: str
+    status: str
+    final_output: str
     summary: str
 
 
@@ -54,142 +67,344 @@ class LoopResult:
     emitted_events: list[SessionEvent]
 
     def render_summary(self) -> str:
-        event_kinds = ",".join(event.kind for event in self.emitted_events)
-        return "\n".join(
-            [
-                "loop_phases: gather -> act -> verify",
-                f"gather_summary: {self.gather.summary}",
-                f"act_strategy: {self.act.strategy}",
-                f"act_tool_name: {self.act.tool_name}",
-                f"act_tool_status: {self.act.tool_status}",
-                f"act_next_action: {self.act.next_action}",
-                f"verify_status: {self.verify.status}",
-                f"verify_summary: {self.verify.summary}",
-                f"emitted_event_count: {len(self.emitted_events)}",
-                f"emitted_event_kinds: {event_kinds}",
-            ]
-        )
+        event_kinds = ",".join(event.kind for event in self.emitted_events) or "<none>"
+        tool_names = ",".join(self.act.executed_tools) or "<none>"
+        lines = [
+            f"mode: {self.act.mode}",
+            "loop_phases: gather -> act -> verify",
+            f"gather_summary: {self.gather.summary}",
+            f"act_strategy: {self.act.strategy}",
+            f"model: {self.act.model}",
+            f"step_count: {self.act.step_count}",
+            f"executed_tools: {tool_names}",
+            f"finish_reason: {self.act.finish_reason}",
+            f"verify_status: {self.verify.status}",
+            f"verify_summary: {self.verify.summary}",
+            f"emitted_event_count: {len(self.emitted_events)}",
+            f"emitted_event_kinds: {event_kinds}",
+            "assistant_response:",
+            self.act.final_output or "<none>",
+        ]
+        return "\n".join(lines)
 
 
 def gather_context(record: SessionRecord, workspace_root: Path) -> GatherPhaseResult:
-    """收集这轮 runtime 需要的最小上下文。
-
-    对应学习文档“5.3 Memory / Context”的第一步，这里开始明确基于统一事件流取数。
-    当前仍然只拿最近用户消息和工作目录，保持最小闭环。
-    真正的文件读取、命令输出和规则文件拼装，会放到后续 context builder 条目里扩展。
-    """
     recent_user_events = record.recent_events(kind=USER_MESSAGE, limit=3)
     latest_task = recent_user_events[-1].payload.get("content", "") if recent_user_events else ""
     recent_tasks = [str(event.payload.get("content", "")) for event in recent_user_events]
+
+    all_recent_events = record.recent_events(limit=20)
+    transcript_events = list(all_recent_events)
+    if transcript_events and transcript_events[-1].kind == USER_MESSAGE:
+        transcript_events = transcript_events[:-1]
+
+    resume_transcript = render_transcript(transcript_events)
     summary = (
         f"loaded {len(recent_user_events)} recent user message(s) from {len(record.events)} total event(s) "
-        f"and prepared "
-        f"workspace context at {workspace_root.name}"
+        f"and prepared workspace context at {workspace_root.name}"
     )
     return GatherPhaseResult(
         latest_task=latest_task,
         recent_tasks=recent_tasks,
+        resume_transcript=resume_transcript,
         summary=summary,
     )
 
 
-def act_on_context(gathered: GatherPhaseResult, workspace_root: Path) -> ActPhaseResult:
-    """根据 gather 结果产出当前这一轮的行动结论。
+def render_transcript(events: list[SessionEvent]) -> str:
+    lines: list[str] = []
+    for event in events:
+        payload = event.payload
+        if event.kind == "user_message":
+            lines.append(f"User: {payload.get('content', '')}")
+        elif event.kind == "tool_call":
+            tool_name = payload.get("tool_name", "")
+            step_index = payload.get("step_index")
+            prefix = f"Tool call step {step_index}" if step_index is not None else "Tool call"
+            lines.append(f"{prefix}: {tool_name} {json.dumps(payload.get('tool_input', {}), ensure_ascii=False)}")
+        elif event.kind == "tool_result":
+            tool_name = payload.get("tool_name", "")
+            status = payload.get("status", "")
+            step_index = payload.get("step_index")
+            prefix = f"Tool result step {step_index}" if step_index is not None else "Tool result"
+            lines.append(
+                f"{prefix}: {tool_name} status={status} "
+                f"{json.dumps(payload.get('tool_output', {}), ensure_ascii=False)}"
+            )
+        elif event.kind == "model_response":
+            lines.append(f"Assistant: {payload.get('content', '')}")
+    return "\n".join(lines)
 
-    按学习文档“4. 核心运行循环”和“5.1 Tool Use”的结论，act 阶段需要
-    真正落到一个结构化工具调用上，而不只是给出抽象下一步。
 
-    当前仍然保持最小版本:
-    - 先由轻量规则把任务文本解析成一个工具调用
-    - 再立刻执行这个工具
-    - 把结果折叠回统一事件流
+def act_on_context(
+    gathered: GatherPhaseResult,
+    record: SessionRecord,
+    workspace_root: Path,
+    *,
+    tool_direct: bool,
+    max_steps: int,
+    model_client: ModelClient | None = None,
+) -> tuple[ActPhaseResult, list[SessionEvent]]:
+    if tool_direct:
+        return _act_via_tool_direct(gathered, record, workspace_root)
+    if model_client is None:
+        raise ValueError("model_client is required in live mode")
+    return _act_via_live_agent(
+        gathered,
+        record,
+        workspace_root,
+        model_client=model_client,
+        max_steps=max_steps,
+    )
 
-    这样可以先证明最小工具集已经进入 Claude Code cleanroom 的主循环，
-    后续再把“谁来决定调用哪个工具”替换成更真实的模型决策层。
-    """
+
+def _act_via_tool_direct(
+    gathered: GatherPhaseResult,
+    record: SessionRecord,
+    workspace_root: Path,
+) -> tuple[ActPhaseResult, list[SessionEvent]]:
     planned_call: ToolCall = plan_tool_call(gathered.latest_task)
-    executed: ToolExecutionResult = execute_tool_call(planned_call, workspace_root)
-    summary = f"executed {planned_call.tool_name} with strategy {planned_call.strategy}"
-    return ActPhaseResult(
+    executed = execute_tool_call(planned_call, workspace_root)
+    emitted = [
+        record.add_tool_call(tool_name=planned_call.tool_name, tool_input=planned_call.tool_input, step_index=1),
+        record.add_tool_result(
+            tool_name=planned_call.tool_name,
+            status=executed.status,
+            tool_output=executed.tool_output,
+            step_index=1,
+        ),
+        record.add_model_response(
+            executed.assistant_message,
+            strategy=planned_call.strategy,
+            next_action=planned_call.next_action,
+            mode="tool-direct",
+            model="tool-direct",
+            finish_reason="tool-direct-complete",
+            step_index=1,
+        ),
+    ]
+    act = ActPhaseResult(
+        mode="tool-direct",
         strategy=planned_call.strategy,
-        assistant_message=executed.assistant_message,
-        next_action=planned_call.next_action,
-        tool_name=planned_call.tool_name,
-        tool_input=planned_call.tool_input,
-        tool_output=executed.tool_output,
-        tool_status=executed.status,
-        summary=summary,
+        model="tool-direct",
+        step_count=1,
+        executed_tools=[planned_call.tool_name],
+        finish_reason="tool-direct-complete",
+        status=executed.status,
+        final_output=executed.assistant_message,
+        summary=f"executed {planned_call.tool_name} via deterministic tool-direct mode",
     )
+    return act, emitted
+
+
+def _act_via_live_agent(
+    gathered: GatherPhaseResult,
+    record: SessionRecord,
+    workspace_root: Path,
+    *,
+    model_client: ModelClient,
+    max_steps: int,
+) -> tuple[ActPhaseResult, list[SessionEvent]]:
+    emitted: list[SessionEvent] = []
+    executed_tools: list[str] = []
+    running_input = [_build_initial_user_input(gathered, workspace_root)]
+
+    for step_index in range(1, max_steps + 1):
+        try:
+            turn = model_client.create_response(
+                instructions=LIVE_AGENT_PROMPT,
+                input_items=running_input,
+                tools=live_tool_schemas(),
+            )
+        except ModelClientError as exc:
+            return (
+                ActPhaseResult(
+                    mode="live",
+                    strategy="live-responses-agent",
+                    model=model_client.model_name,
+                    step_count=step_index - 1,
+                    executed_tools=executed_tools,
+                    finish_reason="api-error",
+                    status="error",
+                    final_output="",
+                    summary=str(exc),
+                ),
+                emitted,
+            )
+
+        if turn.tool_calls:
+            running_input.extend(turn.output_items)
+            for call in turn.tool_calls:
+                if call.name not in READ_ONLY_TOOL_NAMES:
+                    return (
+                        ActPhaseResult(
+                            mode="live",
+                            strategy="live-responses-agent",
+                            model=model_client.model_name,
+                            step_count=step_index,
+                            executed_tools=executed_tools,
+                            finish_reason="invalid-tool-call",
+                            status="error",
+                            final_output="",
+                            summary=f"model requested unsupported tool `{call.name}`",
+                        ),
+                        emitted,
+                    )
+
+                result = execute_named_tool(call.name, call.arguments, workspace_root)
+                executed_tools.append(call.name)
+                emitted.append(
+                    record.add_tool_call(
+                        tool_name=call.name,
+                        tool_input=call.arguments,
+                        step_index=step_index,
+                        call_id=call.call_id,
+                    )
+                )
+                emitted.append(
+                    record.add_tool_result(
+                        tool_name=call.name,
+                        status=result.status,
+                        tool_output=result.tool_output,
+                        step_index=step_index,
+                        call_id=call.call_id,
+                    )
+                )
+                running_input.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call.call_id,
+                        "output": json.dumps(
+                            tool_output_for_model(call.name, result),
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
+            continue
+
+        final_output = turn.output_text or "模型结束了当前回合，但没有返回可见文本。"
+        emitted.append(
+            record.add_model_response(
+                final_output,
+                strategy="live-responses-agent",
+                next_action="current turn complete",
+                mode="live",
+                model=model_client.model_name,
+                finish_reason=turn.finish_reason,
+                step_index=step_index,
+                usage=turn.usage,
+            )
+        )
+        return (
+            ActPhaseResult(
+                mode="live",
+                strategy="live-responses-agent",
+                model=model_client.model_name,
+                step_count=step_index,
+                executed_tools=executed_tools,
+                finish_reason=turn.finish_reason,
+                status="ok",
+                final_output=final_output,
+                summary=f"completed live agent turn in {step_index} step(s)",
+            ),
+            emitted,
+        )
+
+    return (
+        ActPhaseResult(
+            mode="live",
+            strategy="live-responses-agent",
+            model=model_client.model_name,
+            step_count=max_steps,
+            executed_tools=executed_tools,
+            finish_reason="max-steps-reached",
+            status="error",
+            final_output="",
+            summary=f"agent reached max steps ({max_steps}) without a final answer",
+        ),
+        emitted,
+    )
+
+
+def _build_initial_user_input(gathered: GatherPhaseResult, workspace_root: Path) -> dict[str, Any]:
+    sections = [
+        f"Workspace root: {workspace_root}",
+        f"Current task:\n{gathered.latest_task}",
+    ]
+    if gathered.resume_transcript:
+        sections.append(f"Recent session transcript:\n{gathered.resume_transcript}")
+    return {
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": "\n\n".join(sections),
+            }
+        ],
+    }
 
 
 def verify_action(gathered: GatherPhaseResult, acted: ActPhaseResult) -> VerifyPhaseResult:
-    """验证这一轮循环是否形成了可继续的闭环。
-
-    当前 verify 只检查三件事:
-    - gather 阶段拿到了用户任务
-    - act 阶段产出了可读的行动结论
-    - 这轮循环已经给后续工具层留出了明确连接点
-
-    这还是最小 cleanroom 验证，不等同于后续“重新跑测试 / 检查 git diff”的强验证。
-    """
-    is_ready = (
-        bool(gathered.latest_task.strip())
-        and bool(acted.next_action.strip())
-        and bool(acted.tool_name.strip())
-        and bool(acted.tool_status.strip())
-    )
-    if is_ready:
+    if not gathered.latest_task.strip():
         return VerifyPhaseResult(
-            status="loop-ready" if acted.tool_status == "ok" else "loop-needs-attention",
-            summary=(
-                "completed one minimal runtime pass with a real tool call; session now records tool input and output, "
-                "and later phases can layer permission gate, checkpoint and richer context on top"
-            ),
+            status="loop-incomplete",
+            summary="runtime could not find a user task in the current session",
+        )
+
+    if acted.mode == "tool-direct":
+        status = "completed" if acted.status == "ok" else "loop-needs-attention"
+        summary = (
+            "completed one deterministic tool-direct pass"
+            if acted.status == "ok"
+            else "tool-direct execution failed and needs attention"
+        )
+        return VerifyPhaseResult(status=status, summary=summary)
+
+    if acted.finish_reason == "completed":
+        return VerifyPhaseResult(
+            status="completed",
+            summary="live Responses agent returned a final answer",
+        )
+    if acted.finish_reason == "api-error":
+        return VerifyPhaseResult(
+            status="api-error",
+            summary=acted.summary,
+        )
+    if acted.finish_reason == "invalid-tool-call":
+        return VerifyPhaseResult(
+            status="invalid-tool-call",
+            summary=acted.summary,
+        )
+    if acted.finish_reason == "max-steps-reached":
+        return VerifyPhaseResult(
+            status="max-steps-reached",
+            summary=acted.summary,
         )
 
     return VerifyPhaseResult(
-        status="loop-incomplete",
-        summary="runtime could not produce a valid next action from the current session",
+        status="loop-needs-attention",
+        summary=acted.summary,
     )
 
 
-def emit_loop_events(record: SessionRecord, acted: ActPhaseResult) -> list[SessionEvent]:
-    """把本轮 runtime 的关键观察写回统一事件流。
-
-    关键代码链:
-    act 结果 -> tool_call -> tool_result -> model_response -> session JSON
-
-    这里先按最小顺序写三类非用户事件，满足 Phase 2 第 3 点。
-    后续如果加入真实 LLM、多轮工具调用或流式输出，可以继续沿这条链路细化。
-    """
-
-    emitted = [
-        record.add_tool_call(tool_name=acted.tool_name, tool_input=acted.tool_input),
-        record.add_tool_result(
-            tool_name=acted.tool_name,
-            status=acted.tool_status,
-            tool_output=acted.tool_output,
-        ),
-        record.add_model_response(
-            acted.assistant_message,
-            strategy=acted.strategy,
-            next_action=acted.next_action,
-        ),
-    ]
-    return emitted
-
-
-def run_core_loop(record: SessionRecord, workspace_root: Path) -> LoopResult:
-    """执行一轮最小 gather -> act -> verify 主循环。
-
-    这里故意只跑一轮，不做自动多轮迭代:
-    - 先把 Claude Code 的核心节拍和最小工具执行链搭出来
-    - 再在后续条目中逐步补 permission gate、checkpoint 和更强验证
-    """
+def run_core_loop(
+    record: SessionRecord,
+    workspace_root: Path,
+    *,
+    tool_direct: bool,
+    max_steps: int,
+    model_client: ModelClient | None = None,
+) -> LoopResult:
     gathered = gather_context(record, workspace_root)
-    acted = act_on_context(gathered, workspace_root)
+    acted, emitted_events = act_on_context(
+        gathered,
+        record,
+        workspace_root,
+        tool_direct=tool_direct,
+        max_steps=max_steps,
+        model_client=model_client,
+    )
     verified = verify_action(gathered, acted)
-    emitted_events = emit_loop_events(record, acted)
     return LoopResult(
         gather=gathered,
         act=acted,
