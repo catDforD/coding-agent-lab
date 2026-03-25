@@ -97,6 +97,7 @@ reproductions/claude-code/
 
 ```text
 CLI 参数 -> session store.events -> runtime.gather_context
+-> context_builder.load_rules/build_prompt_context
 -> live Responses agent / tool-direct planner
 -> tool execution
 -> session events / terminal summary
@@ -105,12 +106,14 @@ CLI 参数 -> session store.events -> runtime.gather_context
 
 最小边界如下:
 - `gather`: 从统一事件流里提取最近用户消息，并把最近事件折叠成 resume transcript
+- `rules`: 启动时会从 workspace 向上查找 `CLAUDE.md`，读取用户级规则文件，并读取 workspace 下 `MEMORY.md` 的前 200 行
+- `context builder`: 首轮 live 输入会统一拼接当前任务、规则文件、最近会话历史和最近工具输出
 - `act/live`: 通过 Responses API 让模型决定是否调用只读工具，并在多轮 `function_call -> function_call_output` 后返回最终答案
 - `act/tool-direct`: 把任务文本折叠成显式工具调用，作为 deterministic/debug 入口
 - `emit events`: 把 live/tool-direct 产生的 `tool_call`、`tool_result`、`model_response` 追加回 session
 - `verify`: 区分 `completed`、`api-error`、`invalid-tool-call`、`max-steps-reached`
 
-这一步已经能看到真实模型效果，但还没有做 `CLAUDE.md` / `MEMORY.md`、compaction、permission gate 和 checkpoint。
+这一步已经能看到真实模型效果，但还没有做真正的 compaction、permission gate 和 checkpoint。
 
 ### 当前事件流结构
 

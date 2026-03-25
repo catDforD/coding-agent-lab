@@ -18,8 +18,8 @@
 - `read_file`、`search`、`git_status` 已进入 live agent 工具集；`edit` 和 `bash` 仍保留在 `--tool-direct` 调试模式，等待 Phase 4 的 permission gate。
 
 ## Phase 3. 补上下文和规则层
-- [ ] 启动时加载项目 `CLAUDE.md`、用户级规则和一个简化版 `MEMORY.md`。见“5.3 Memory / Context”。
-- [ ] 设计 prompt/context builder，把会话历史、最近工具输出和规则文件拼成统一输入。见“3.1 官方可直接确认的高层结构”和“5.3 Memory / Context”。
+- [x] 启动时加载项目 `CLAUDE.md`、用户级规则和一个简化版 `MEMORY.md`。见“5.3 Memory / Context”。落实见 [reproductions/claude-code/claude_code/context_builder.py](../../reproductions/claude-code/claude_code/context_builder.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py) 和 [reproductions/claude-code/tests/test_runtime_live.py](../../reproductions/claude-code/tests/test_runtime_live.py)。
+- [x] 设计 prompt/context builder，把会话历史、最近工具输出和规则文件拼成统一输入。见“3.1 官方可直接确认的高层结构”和“5.3 Memory / Context”。落实见 [reproductions/claude-code/claude_code/context_builder.py](../../reproductions/claude-code/claude_code/context_builder.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py)、[reproductions/claude-code/tests/test_runtime_live.py](../../reproductions/claude-code/tests/test_runtime_live.py) 和 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md)。
 - [ ] 加一个最小 compaction 策略：优先裁掉旧工具输出，再保留一段摘要。见“5.3 Memory / Context”。
 
 ## Phase 4. 补控制层
