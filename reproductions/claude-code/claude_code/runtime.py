@@ -12,8 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .context_builder import build_prompt_context
 from .model_client import ModelClient, ModelClientError
-from .session_store import SessionEvent, SessionRecord, USER_MESSAGE
+from .session_store import SessionEvent, SessionRecord
 from .tools import (
     READ_ONLY_TOOL_NAMES,
     ToolCall,
@@ -37,6 +38,9 @@ class GatherPhaseResult:
     latest_task: str
     recent_tasks: list[str]
     resume_transcript: str
+    recent_tool_outputs: str
+    prompt_instructions: str
+    prompt_input_text: str
     summary: str
 
 
@@ -89,51 +93,20 @@ class LoopResult:
 
 
 def gather_context(record: SessionRecord, workspace_root: Path) -> GatherPhaseResult:
-    recent_user_events = record.recent_events(kind=USER_MESSAGE, limit=3)
-    latest_task = recent_user_events[-1].payload.get("content", "") if recent_user_events else ""
-    recent_tasks = [str(event.payload.get("content", "")) for event in recent_user_events]
-
-    all_recent_events = record.recent_events(limit=20)
-    transcript_events = list(all_recent_events)
-    if transcript_events and transcript_events[-1].kind == USER_MESSAGE:
-        transcript_events = transcript_events[:-1]
-
-    resume_transcript = render_transcript(transcript_events)
-    summary = (
-        f"loaded {len(recent_user_events)} recent user message(s) from {len(record.events)} total event(s) "
-        f"and prepared workspace context at {workspace_root.name}"
+    bundle = build_prompt_context(
+        record,
+        workspace_root,
+        base_instructions=LIVE_AGENT_PROMPT,
     )
     return GatherPhaseResult(
-        latest_task=latest_task,
-        recent_tasks=recent_tasks,
-        resume_transcript=resume_transcript,
-        summary=summary,
+        latest_task=bundle.latest_task,
+        recent_tasks=bundle.recent_tasks,
+        resume_transcript=bundle.resume_transcript,
+        recent_tool_outputs=bundle.recent_tool_outputs,
+        prompt_instructions=bundle.instructions,
+        prompt_input_text=bundle.initial_input_text,
+        summary=bundle.summary,
     )
-
-
-def render_transcript(events: list[SessionEvent]) -> str:
-    lines: list[str] = []
-    for event in events:
-        payload = event.payload
-        if event.kind == "user_message":
-            lines.append(f"User: {payload.get('content', '')}")
-        elif event.kind == "tool_call":
-            tool_name = payload.get("tool_name", "")
-            step_index = payload.get("step_index")
-            prefix = f"Tool call step {step_index}" if step_index is not None else "Tool call"
-            lines.append(f"{prefix}: {tool_name} {json.dumps(payload.get('tool_input', {}), ensure_ascii=False)}")
-        elif event.kind == "tool_result":
-            tool_name = payload.get("tool_name", "")
-            status = payload.get("status", "")
-            step_index = payload.get("step_index")
-            prefix = f"Tool result step {step_index}" if step_index is not None else "Tool result"
-            lines.append(
-                f"{prefix}: {tool_name} status={status} "
-                f"{json.dumps(payload.get('tool_output', {}), ensure_ascii=False)}"
-            )
-        elif event.kind == "model_response":
-            lines.append(f"Assistant: {payload.get('content', '')}")
-    return "\n".join(lines)
 
 
 def act_on_context(
@@ -207,12 +180,12 @@ def _act_via_live_agent(
 ) -> tuple[ActPhaseResult, list[SessionEvent]]:
     emitted: list[SessionEvent] = []
     executed_tools: list[str] = []
-    running_input = [_build_initial_user_input(gathered, workspace_root)]
+    running_input = [_build_initial_user_input(gathered)]
 
     for step_index in range(1, max_steps + 1):
         try:
             turn = model_client.create_response(
-                instructions=LIVE_AGENT_PROMPT,
+                instructions=gathered.prompt_instructions,
                 input_items=running_input,
                 tools=live_tool_schemas(),
             )
@@ -326,19 +299,13 @@ def _act_via_live_agent(
     )
 
 
-def _build_initial_user_input(gathered: GatherPhaseResult, workspace_root: Path) -> dict[str, Any]:
-    sections = [
-        f"Workspace root: {workspace_root}",
-        f"Current task:\n{gathered.latest_task}",
-    ]
-    if gathered.resume_transcript:
-        sections.append(f"Recent session transcript:\n{gathered.resume_transcript}")
+def _build_initial_user_input(gathered: GatherPhaseResult) -> dict[str, Any]:
     return {
         "role": "user",
         "content": [
             {
                 "type": "input_text",
-                "text": "\n\n".join(sections),
+                "text": gathered.prompt_input_text,
             }
         ],
     }

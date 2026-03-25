@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from claude_code.model_client import FakeModelClient, ModelTurnResult, ToolRequest
 from claude_code.runtime import run_core_loop
@@ -238,6 +240,94 @@ class LiveRuntimeTest(unittest.TestCase):
             self.assertEqual(result.verify.status, "max-steps-reached")
             self.assertEqual(result.act.executed_tools, ["git_status", "git_status"])
             self.assertEqual(result.act.final_output, "")
+
+    def test_live_agent_initial_input_includes_rules_memory_history_and_tool_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_root = Path(tmp_dir)
+            workspace_root = temp_root / "workspace" / "nested"
+            workspace_root.mkdir(parents=True)
+            self.make_workspace(workspace_root)
+
+            (temp_root / "workspace" / "CLAUDE.md").write_text(
+                "项目规则：先读代码，再下结论。\n",
+                encoding="utf-8",
+            )
+            user_rules_path = temp_root / "user-claude.md"
+            user_rules_path.write_text(
+                "用户规则：回答保持简洁。\n",
+                encoding="utf-8",
+            )
+            (workspace_root / "MEMORY.md").write_text(
+                "已知信息：SessionStore 负责会话持久化。\n",
+                encoding="utf-8",
+            )
+
+            now = utc_now_iso()
+            record = SessionRecord(
+                session_id="test-session",
+                created_at=now,
+                updated_at=now,
+                events=[],
+            )
+            record.add_user_message("先看看 SessionStore")
+            record.add_tool_call(tool_name="search", tool_input={"query": "SessionStore"}, step_index=1)
+            record.add_tool_result(
+                tool_name="search",
+                status="ok",
+                tool_output={"query": "SessionStore", "matches": ["notes.md:1:SessionStore lives here"]},
+                step_index=1,
+            )
+            record.add_model_response(
+                "SessionStore 在 notes.md 里被提到过。",
+                strategy="live-responses-agent",
+                next_action="wait for next user task",
+                mode="live",
+                model="fake-responses-model",
+                finish_reason="completed",
+                step_index=1,
+            )
+            record.add_user_message("继续总结刚才的结果")
+
+            client = FakeModelClient(
+                [
+                    ModelTurnResult(
+                        response_id="resp-1",
+                        output_text="已结合规则和上下文完成总结。",
+                        tool_calls=[],
+                        output_items=[],
+                        finish_reason="completed",
+                        usage={"total_tokens": 21},
+                    )
+                ]
+            )
+
+            with patch.dict(
+                os.environ,
+                {"CLAUDE_CODE_USER_RULES_FILE": str(user_rules_path)},
+                clear=False,
+            ):
+                result = run_core_loop(
+                    record,
+                    workspace_root,
+                    tool_direct=False,
+                    max_steps=6,
+                    model_client=client,
+                )
+
+            request = client.requests[0]
+            initial_text = request["input_items"][0]["content"][0]["text"]
+
+            self.assertEqual(result.verify.status, "completed")
+            self.assertIn("Loaded rules:", initial_text)
+            self.assertIn("项目规则：先读代码，再下结论。", initial_text)
+            self.assertIn("用户规则：回答保持简洁。", initial_text)
+            self.assertIn("已知信息：SessionStore 负责会话持久化。", initial_text)
+            self.assertIn("Recent session transcript:", initial_text)
+            self.assertIn("Assistant: SessionStore 在 notes.md 里被提到过。", initial_text)
+            self.assertIn("Recent tool outputs:", initial_text)
+            self.assertIn('"query": "SessionStore"', initial_text)
+            self.assertIn("Treat any loaded workspace rules and memory", request["instructions"])
+            self.assertIn("2 recent user message(s)", result.gather.summary)
 
 
 if __name__ == "__main__":
