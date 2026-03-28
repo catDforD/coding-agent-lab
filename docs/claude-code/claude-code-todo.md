@@ -2,6 +2,11 @@
 
 关联文档: [Claude Code 学习文档](./claude-code-study.md)
 
+## 当前状态
+- 截至 `2026-03-28`，`Phase 1` 到 `Phase 3` 已基本完成，当前主阻塞点已经收敛到控制层：permission gate、checkpoint、allowlist / denylist 模块化。
+- 代码侧已经具备三块稳定基线：真实 Responses API 驱动的只读 live agent、统一 session 事件流、规则加载与最小 compaction。
+- Web UI 已作为观察和驱动 runtime 的辅助壳层接入，但不改变当前 todo 的主线优先级；主线仍然是先把 CLI/runtime 的控制层补齐。
+
 ## Phase 1. 补齐输入和边界
 - [x] 确认这次复现只追求最小闭环，不追求完整 UI、完整插件市场和完整云端环境。见学习文档的“9. 可复现的最小子集”。落实见 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md) 的“Phase 1 范围”。
 - [x] 先固定 cleanroom 原则：只依据公开行为和公开接口复现，不假设拿到了 Claude Code 内核源码。见“3.3 已证实事实与推断的边界”。落实见 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md) 的“Cleanroom 原则”。
@@ -13,14 +18,15 @@
 - [x] 定义统一事件流结构，至少记录用户消息、模型响应、工具调用、工具结果。见“5.3 Memory / Context”和“9.1 第一阶段必须有”。落实见 [reproductions/claude-code/claude_code/session_store.py](../../reproductions/claude-code/claude_code/session_store.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py) 和 [reproductions/claude-code/tests/test_cli.py](../../reproductions/claude-code/tests/test_cli.py)。
 - [x] 接入最小工具集：`read_file`、`search`、`edit`、`bash`、`git_status`。见“5.1 Tool Use”和“9.1 第一阶段必须有”。落实见 [reproductions/claude-code/claude_code/tools.py](../../reproductions/claude-code/claude_code/tools.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py)、[reproductions/claude-code/claude_code/cli.py](../../reproductions/claude-code/claude_code/cli.py)、[reproductions/claude-code/tests/test_cli.py](../../reproductions/claude-code/tests/test_cli.py) 和 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md)。
 
-当前增量说明:
+当前实现补充:
 - 已接入真实大模型 API，默认通过官方 `openai` SDK 的 Responses API 跑最小多轮只读代理。
 - `read_file`、`search`、`git_status` 已进入 live agent 工具集；`edit` 和 `bash` 仍保留在 `--tool-direct` 调试模式，等待 Phase 4 的 permission gate。
+- 已补一个基础 Web UI，用于查看历史 session、继续会话，以及检查本轮 runtime 摘要；它是辅助壳层，不是当前主里程碑。
 
 ## Phase 3. 补上下文和规则层
 - [x] 启动时加载项目 `CLAUDE.md`、用户级规则和一个简化版 `MEMORY.md`。见“5.3 Memory / Context”。落实见 [reproductions/claude-code/claude_code/context_builder.py](../../reproductions/claude-code/claude_code/context_builder.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py) 和 [reproductions/claude-code/tests/test_runtime_live.py](../../reproductions/claude-code/tests/test_runtime_live.py)。
 - [x] 设计 prompt/context builder，把会话历史、最近工具输出和规则文件拼成统一输入。见“3.1 官方可直接确认的高层结构”和“5.3 Memory / Context”。落实见 [reproductions/claude-code/claude_code/context_builder.py](../../reproductions/claude-code/claude_code/context_builder.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py)、[reproductions/claude-code/tests/test_runtime_live.py](../../reproductions/claude-code/tests/test_runtime_live.py) 和 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md)。
-- [ ] 加一个最小 compaction 策略：优先裁掉旧工具输出，再保留一段摘要。见“5.3 Memory / Context”。
+- [x] 加一个最小 compaction 策略：优先裁掉旧工具输出，再保留一段摘要。见“5.3 Memory / Context”。落实见 [reproductions/claude-code/claude_code/context_builder.py](../../reproductions/claude-code/claude_code/context_builder.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py)、[reproductions/claude-code/tests/test_runtime_live.py](../../reproductions/claude-code/tests/test_runtime_live.py) 和 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md)。
 
 ## Phase 4. 补控制层
 - [ ] 给 `bash` 和 `edit` 加 permission gate，先做最简单的 confirm/deny 交互。见“5.5 Safety / Boundaries”。

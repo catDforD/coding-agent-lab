@@ -4,6 +4,21 @@
 - [Claude Code 学习文档](../../docs/claude-code/claude-code-study.md)
 - [Claude Code 最小实现 Todo](../../docs/claude-code/claude-code-todo.md)
 
+## 当前状态
+
+截至 `2026-03-28`，当前 cleanroom 复现已经具备下面这些稳定基线：
+- 真实 Responses API 驱动的最小 live 只读 agent 闭环。
+- 统一 session 事件流，以及 `--continue-last` / `--session-id` 会话续跑。
+- `CLAUDE.md`、用户规则、`MEMORY.md` 前 200 行的统一加载。
+- “旧工具输出优先裁掉，再摘要更老会话”的最小 deterministic compaction。
+- 基础 Web UI 工作台，用来查看 session、继续会话和检查本轮 `gather -> act -> verify` 摘要。
+
+当前仍未完成的核心模块：
+- permission gate
+- checkpoint / undo
+- live 模式下的写入型工具开放
+- plan mode、subagent、hooks、文件协议化扩展层
+
 ## Phase 1 范围
 
 当前复现只追求 Claude Code 的最小闭环，用来学习它的运行时结构，不追求下面这些内容:
@@ -108,12 +123,13 @@ CLI 参数 -> session store.events -> runtime.gather_context
 - `gather`: 从统一事件流里提取最近用户消息，并把最近事件折叠成 resume transcript
 - `rules`: 启动时会从 workspace 向上查找 `CLAUDE.md`，读取用户级规则文件，并读取 workspace 下 `MEMORY.md` 的前 200 行
 - `context builder`: 首轮 live 输入会统一拼接当前任务、规则文件、最近会话历史和最近工具输出
+- `compaction`: 旧工具输出优先不再原样进入 transcript，更老的会话会收成一段 deterministic 摘要；最近少量工具结果仍单独保留原文
 - `act/live`: 通过 Responses API 让模型决定是否调用只读工具，并在多轮 `function_call -> function_call_output` 后返回最终答案
 - `act/tool-direct`: 把任务文本折叠成显式工具调用，作为 deterministic/debug 入口
 - `emit events`: 把 live/tool-direct 产生的 `tool_call`、`tool_result`、`model_response` 追加回 session
 - `verify`: 区分 `completed`、`api-error`、`invalid-tool-call`、`max-steps-reached`
 
-这一步已经能看到真实模型效果，但还没有做真正的 compaction、permission gate 和 checkpoint。
+这一步已经能看到真实模型效果，且已经补上最小 compaction；但还没有做 permission gate 和 checkpoint。
 
 ### 当前事件流结构
 
@@ -305,6 +321,6 @@ uv run python -m claude_code "搜索 SessionStore"
 - 旧版只含 `user_tasks` 的 session 能自动迁移成统一事件流
 
 当前仍然保留几个明确边界:
-- live 模式还没有 `CLAUDE.md` / `MEMORY.md` / compaction。
+- live 模式已经有 `CLAUDE.md` / `MEMORY.md` / 最小 compaction，但还没有更细的 relevance packing、缓存和策略切换。
 - live 模式不开放 `edit` 和 `bash`。
 - tool-direct 仍然是调试入口，不是最终的 Claude Code 风格交互。
