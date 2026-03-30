@@ -12,6 +12,7 @@ from typing import Any
 
 from .config import ConfigError, load_openai_settings, workspace_root
 from .model_client import LiveOpenAIClient, ModelClientError
+from .permissions import PermissionGate
 from .runtime import LoopResult, run_core_loop
 from .session_store import MODEL_RESPONSE, SessionRecord, SessionStore
 
@@ -108,6 +109,7 @@ class ClaudeCodeAppService:
         *,
         tool_direct: bool,
         max_steps: int,
+        permission_gate: PermissionGate | None = None,
     ) -> LoopResult:
         model_client = None
         if not tool_direct:
@@ -119,6 +121,7 @@ class ClaudeCodeAppService:
             tool_direct=tool_direct,
             max_steps=max_steps,
             model_client=model_client,
+            permission_gate=permission_gate,
         )
         self.store.save(record)
         return loop_result

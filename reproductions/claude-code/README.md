@@ -14,7 +14,6 @@
 - 基础 Web UI 工作台，用来查看 session、继续会话和检查本轮 `gather -> act -> verify` 摘要。
 
 当前仍未完成的核心模块：
-- permission gate
 - checkpoint / undo
 - live 模式下的写入型工具开放
 - plan mode、subagent、hooks、文件协议化扩展层
@@ -104,7 +103,21 @@ reproductions/claude-code/
 
 当前的 cleanroom 取舍是:
 - live 模式先只开放只读工具 `read_file`、`search`、`git_status`
-- `edit` 和 `bash` 仍然只在 `--tool-direct` 下可用，避免在 permission gate 落地前直接开放写入和命令执行
+- `edit` 和 `bash` 仍然只在 `--tool-direct` 下可用，但现在会先经过最小 `confirm / deny` permission gate，再决定是否真正执行
+
+### 当前 control layer 边界
+
+Phase 4 当前已先补上最小 permission gate：
+- 只拦截高风险工具 `edit` 和 `bash`
+- 只在 CLI 的 `--tool-direct` 路径里做同步终端确认
+- 用户输入 `y` / `yes` 才执行；其他输入或没有确认时一律拒绝
+- 拒绝结果会继续写入统一事件流，便于后续接 checkpoint、allowlist / denylist 和 hooks
+
+当前还没有做的部分：
+- 写入前 checkpoint / undo
+- 配置化 allowlist / denylist
+- live 模式下的写入工具开放
+- Web UI 里的确认交互
 
 ### 当前主循环边界
 
@@ -129,7 +142,7 @@ CLI 参数 -> session store.events -> runtime.gather_context
 - `emit events`: 把 live/tool-direct 产生的 `tool_call`、`tool_result`、`model_response` 追加回 session
 - `verify`: 区分 `completed`、`api-error`、`invalid-tool-call`、`max-steps-reached`
 
-这一步已经能看到真实模型效果，且已经补上最小 compaction；但还没有做 permission gate 和 checkpoint。
+这一步已经能看到真实模型效果，且已经补上最小 compaction 与最小 permission gate；但还没有做 checkpoint。
 
 ### 当前事件流结构
 

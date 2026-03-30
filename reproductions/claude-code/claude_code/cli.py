@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from .app_service import ClaudeCodeAppService, RuntimeUnavailableError
+from .permissions import InteractivePermissionGate
 from .session_store import SessionRecord
 
 
@@ -90,10 +91,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     try:
+        permission_gate = InteractivePermissionGate() if args.tool_direct else None
         loop_result = service.run_turn(
             record,
             tool_direct=args.tool_direct,
             max_steps=args.max_steps,
+            permission_gate=permission_gate,
         )
     except RuntimeUnavailableError as exc:
         print(f"error: {exc}", file=sys.stderr)
