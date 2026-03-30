@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .permissions import PermissionGate
+
 READ_ONLY_TOOL_NAMES = ("read_file", "search", "git_status")
 
 
@@ -142,7 +144,12 @@ def plan_tool_call(task: str) -> ToolCall:
     )
 
 
-def execute_tool_call(call: ToolCall, workspace_root: Path) -> ToolExecutionResult:
+def execute_tool_call(
+    call: ToolCall,
+    workspace_root: Path,
+    *,
+    permission_gate: PermissionGate | None = None,
+) -> ToolExecutionResult:
     """执行一个最小工具调用。
 
     这里把 runtime 和具体工具逻辑拆开，是为了对齐学习文档 5.1 的结论:
@@ -150,13 +157,20 @@ def execute_tool_call(call: ToolCall, workspace_root: Path) -> ToolExecutionResu
     后续要加 permission gate、hooks、checkpoint，都应该围绕这里继续展开。
     """
 
-    return execute_named_tool(call.tool_name, call.tool_input, workspace_root)
+    return execute_named_tool(
+        call.tool_name,
+        call.tool_input,
+        workspace_root,
+        permission_gate=permission_gate,
+    )
 
 
 def execute_named_tool(
     tool_name: str,
     tool_input: dict[str, Any],
     workspace_root: Path,
+    *,
+    permission_gate: PermissionGate | None = None,
 ) -> ToolExecutionResult:
     handlers = {
         "read_file": _run_read_file,
@@ -167,6 +181,27 @@ def execute_named_tool(
     }
     if tool_name not in handlers:
         raise ValueError(f"unsupported tool: {tool_name}")
+
+    # Phase 4 先把写入和命令执行纳入最小 permission gate，后续再继续扩成策略模块。
+    if permission_gate is not None:
+        decision = permission_gate.confirm_tool_use(tool_name, tool_input)
+        if not decision.allowed:
+            return ToolExecutionResult(
+                status="denied",
+                tool_output={
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "permission": {
+                        "status": "denied",
+                        "reason": decision.reason,
+                    },
+                },
+                assistant_message=(
+                    f"工具 `{tool_name}` 未执行：{decision.reason}。"
+                    "当前最小 control layer 会在这里停止，不继续触发真实写入或命令执行。"
+                ),
+                summary=f"permission denied for tool {tool_name}",
+            )
 
     handler = handlers[tool_name]
     try:
