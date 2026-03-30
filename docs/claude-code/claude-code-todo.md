@@ -20,7 +20,7 @@
 
 当前实现补充:
 - 已接入真实大模型 API，默认通过官方 `openai` SDK 的 Responses API 跑最小多轮只读代理。
-- `read_file`、`search`、`git_status` 已进入 live agent 工具集；`edit` 和 `bash` 仍保留在 `--tool-direct` 调试模式，等待 Phase 4 的 permission gate。
+- `read_file`、`search`、`git_status` 已进入 live agent 工具集；`edit` 和 `bash` 仍保留在 `--tool-direct` 调试模式，并已先接入最小 `confirm / deny` permission gate。
 - 已补一个基础 Web UI，用于查看历史 session、继续会话，以及检查本轮 runtime 摘要；它是辅助壳层，不是当前主里程碑。
 
 ## Phase 3. 补上下文和规则层
@@ -29,7 +29,7 @@
 - [x] 加一个最小 compaction 策略：优先裁掉旧工具输出，再保留一段摘要。见“5.3 Memory / Context”。落实见 [reproductions/claude-code/claude_code/context_builder.py](../../reproductions/claude-code/claude_code/context_builder.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py)、[reproductions/claude-code/tests/test_runtime_live.py](../../reproductions/claude-code/tests/test_runtime_live.py) 和 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md)。
 
 ## Phase 4. 补控制层
-- [ ] 给 `bash` 和 `edit` 加 permission gate，先做最简单的 confirm/deny 交互。见“5.5 Safety / Boundaries”。
+- [x] 给 `bash` 和 `edit` 加 permission gate，先做最简单的 confirm/deny 交互。见“5.5 Safety / Boundaries”。落实见 [reproductions/claude-code/claude_code/permissions.py](../../reproductions/claude-code/claude_code/permissions.py)、[reproductions/claude-code/claude_code/tools.py](../../reproductions/claude-code/claude_code/tools.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py)、[reproductions/claude-code/claude_code/cli.py](../../reproductions/claude-code/claude_code/cli.py)、[reproductions/claude-code/tests/test_cli.py](../../reproductions/claude-code/tests/test_cli.py) 和 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md)。
 - [ ] 做文件 checkpoint：写入前备份、支持撤销最近一次修改。见“5.5 Safety / Boundaries”和“9.1 第一阶段必须有”。
 - [ ] 把 allowlist / denylist 配置做成单独模块，避免以后和 runtime 耦合。见“5.5 Safety / Boundaries”。
 

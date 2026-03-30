@@ -14,6 +14,7 @@ from typing import Any
 
 from .context_builder import build_prompt_context
 from .model_client import ModelClient, ModelClientError
+from .permissions import PermissionGate
 from .session_store import SessionEvent, SessionRecord
 from .tools import (
     READ_ONLY_TOOL_NAMES,
@@ -117,9 +118,15 @@ def act_on_context(
     tool_direct: bool,
     max_steps: int,
     model_client: ModelClient | None = None,
+    permission_gate: PermissionGate | None = None,
 ) -> tuple[ActPhaseResult, list[SessionEvent]]:
     if tool_direct:
-        return _act_via_tool_direct(gathered, record, workspace_root)
+        return _act_via_tool_direct(
+            gathered,
+            record,
+            workspace_root,
+            permission_gate=permission_gate,
+        )
     if model_client is None:
         raise ValueError("model_client is required in live mode")
     return _act_via_live_agent(
@@ -135,9 +142,15 @@ def _act_via_tool_direct(
     gathered: GatherPhaseResult,
     record: SessionRecord,
     workspace_root: Path,
+    *,
+    permission_gate: PermissionGate | None = None,
 ) -> tuple[ActPhaseResult, list[SessionEvent]]:
     planned_call: ToolCall = plan_tool_call(gathered.latest_task)
-    executed = execute_tool_call(planned_call, workspace_root)
+    executed = execute_tool_call(
+        planned_call,
+        workspace_root,
+        permission_gate=permission_gate,
+    )
     emitted = [
         record.add_tool_call(tool_name=planned_call.tool_name, tool_input=planned_call.tool_input, step_index=1),
         record.add_tool_result(
@@ -361,6 +374,7 @@ def run_core_loop(
     tool_direct: bool,
     max_steps: int,
     model_client: ModelClient | None = None,
+    permission_gate: PermissionGate | None = None,
 ) -> LoopResult:
     gathered = gather_context(record, workspace_root)
     acted, emitted_events = act_on_context(
@@ -370,6 +384,7 @@ def run_core_loop(
         tool_direct=tool_direct,
         max_steps=max_steps,
         model_client=model_client,
+        permission_gate=permission_gate,
     )
     verified = verify_action(gathered, acted)
     return LoopResult(

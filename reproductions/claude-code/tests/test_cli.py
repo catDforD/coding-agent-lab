@@ -21,6 +21,7 @@ class CliEntryTest(unittest.TestCase):
         state_dir: Path,
         workspace_root: Path,
         extra_env: dict[str, str] | None = None,
+        stdin_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["CLAUDE_CODE_STATE_DIR"] = str(state_dir)
@@ -35,6 +36,7 @@ class CliEntryTest(unittest.TestCase):
             [sys.executable, "-m", "claude_code", *args],
             cwd=PROJECT_DIR,
             env=env,
+            input=stdin_text,
             capture_output=True,
             text=True,
             check=False,
@@ -123,6 +125,7 @@ class CliEntryTest(unittest.TestCase):
                 "edit src/sample.txt -- beta -- gamma",
                 state_dir=state_dir,
                 workspace_root=workspace_root,
+                stdin_text="y\n",
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -136,6 +139,36 @@ class CliEntryTest(unittest.TestCase):
             tool_output = payload["events"][2]["payload"]["tool_output"]
             self.assertEqual(tool_output["path"], "src/sample.txt")
             self.assertEqual(tool_output["replacements"], 1)
+
+    def test_edit_tool_stops_when_user_denies_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            workspace_root = root / "workspace"
+            state_dir = root / "state"
+            workspace_root.mkdir()
+            self.make_workspace(workspace_root)
+
+            result = self.run_cli(
+                "--tool-direct",
+                "edit src/sample.txt -- beta -- gamma",
+                state_dir=state_dir,
+                workspace_root=workspace_root,
+                stdin_text="n\n",
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("Permission required for tool `edit`.", result.stdout)
+            self.assertEqual(
+                (workspace_root / "src" / "sample.txt").read_text(encoding="utf-8"),
+                "alpha\nbeta\n",
+            )
+
+            payload = self.read_session_payload(state_dir)
+            self.assertEqual(payload["events"][2]["payload"]["status"], "denied")
+            self.assertEqual(
+                payload["events"][2]["payload"]["tool_output"]["permission"]["status"],
+                "denied",
+            )
 
     def test_bash_tool_records_command_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -151,6 +184,7 @@ class CliEntryTest(unittest.TestCase):
                 "printf ready",
                 state_dir=state_dir,
                 workspace_root=workspace_root,
+                stdin_text="yes\n",
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -161,6 +195,32 @@ class CliEntryTest(unittest.TestCase):
             self.assertEqual(tool_output["command"], "printf ready")
             self.assertEqual(tool_output["stdout"], "ready")
             self.assertEqual(tool_output["returncode"], 0)
+
+    def test_bash_tool_stops_when_input_stream_has_no_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            workspace_root = root / "workspace"
+            state_dir = root / "state"
+            workspace_root.mkdir()
+            self.make_workspace(workspace_root)
+
+            result = self.run_cli(
+                "--tool-direct",
+                "bash",
+                "printf ready",
+                state_dir=state_dir,
+                workspace_root=workspace_root,
+                stdin_text="",
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("Permission required for tool `bash`.", result.stdout)
+
+            payload = self.read_session_payload(state_dir)
+            tool_output = payload["events"][2]["payload"]["tool_output"]
+            self.assertEqual(payload["events"][2]["payload"]["status"], "denied")
+            self.assertEqual(tool_output["permission"]["status"], "denied")
+            self.assertEqual(tool_output["tool_name"], "bash")
 
     def test_git_status_tool_records_workspace_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
