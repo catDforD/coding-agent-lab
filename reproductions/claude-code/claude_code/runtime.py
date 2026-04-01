@@ -2,7 +2,7 @@
 
 当前 runtime 同时支持两条路径:
 - live 模式: 使用 OpenAI Responses API 驱动最小多轮只读代理
-- tool-direct 模式: 继续保留 Phase 2 的显式工具调试入口
+- tool-direct 模式: 继续保留 Phase 2 的显式工具调试入口，并在写入链上接最小 checkpoint
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .checkpoints import CheckpointStore
 from .context_builder import build_prompt_context
 from .model_client import ModelClient, ModelClientError
 from .permissions import PermissionGate
@@ -119,6 +120,7 @@ def act_on_context(
     max_steps: int,
     model_client: ModelClient | None = None,
     permission_gate: PermissionGate | None = None,
+    checkpoint_store: CheckpointStore | None = None,
 ) -> tuple[ActPhaseResult, list[SessionEvent]]:
     if tool_direct:
         return _act_via_tool_direct(
@@ -126,6 +128,7 @@ def act_on_context(
             record,
             workspace_root,
             permission_gate=permission_gate,
+            checkpoint_store=checkpoint_store,
         )
     if model_client is None:
         raise ValueError("model_client is required in live mode")
@@ -144,12 +147,21 @@ def _act_via_tool_direct(
     workspace_root: Path,
     *,
     permission_gate: PermissionGate | None = None,
+    checkpoint_store: CheckpointStore | None = None,
 ) -> tuple[ActPhaseResult, list[SessionEvent]]:
+    """走显式工具调试路径。
+
+    当前这条链除了保留 Phase 2 的 deterministic 工具入口，也承担 Phase 4
+    的最小控制层验证职责:
+    CLI 任务文本 -> 显式 ToolCall -> permission gate / checkpoint -> 结构化事件流
+    """
+
     planned_call: ToolCall = plan_tool_call(gathered.latest_task)
     executed = execute_tool_call(
         planned_call,
         workspace_root,
         permission_gate=permission_gate,
+        checkpoint_store=checkpoint_store,
     )
     emitted = [
         record.add_tool_call(tool_name=planned_call.tool_name, tool_input=planned_call.tool_input, step_index=1),
@@ -375,6 +387,7 @@ def run_core_loop(
     max_steps: int,
     model_client: ModelClient | None = None,
     permission_gate: PermissionGate | None = None,
+    checkpoint_store: CheckpointStore | None = None,
 ) -> LoopResult:
     gathered = gather_context(record, workspace_root)
     acted, emitted_events = act_on_context(
@@ -385,6 +398,7 @@ def run_core_loop(
         max_steps=max_steps,
         model_client=model_client,
         permission_gate=permission_gate,
+        checkpoint_store=checkpoint_store,
     )
     verified = verify_action(gathered, acted)
     return LoopResult(

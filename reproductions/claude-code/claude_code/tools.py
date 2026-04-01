@@ -12,7 +12,7 @@ runtime 解析任务文本 -> ToolCall -> execute_tool_call -> 文件系统 / su
 - 9.1 第一阶段必须有
 
 当前取舍:
-- 先做一个最小、可替换的工具执行层，不提前实现 permission gate 和 checkpoint。
+- 先做一个最小、可替换的工具执行层，把 permission gate 和 checkpoint 作为可插拔控制层接进来。
 - 任务解析只支持少量显式命令格式，目的是先把“真实工具接入事件流”这件事钉住。
 - 所有文件路径都限制在 workspace 内，给后续控制层留清晰边界。
 """
@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .checkpoints import CheckpointStore
 from .permissions import PermissionGate
 
 READ_ONLY_TOOL_NAMES = ("read_file", "search", "git_status")
@@ -68,6 +69,7 @@ def plan_tool_call(task: str) -> ToolCall:
     - `read_file <path>` / `读取文件 <path>`
     - `search <query>` / `搜索 <query>`
     - `edit <path> -- <old> -- <new>` / `编辑 <path> -- <old> -- <new>`
+    - `undo_last_edit` / `撤销最近一次修改`
     - `bash <command>` / `执行命令 <command>`
     - `git_status` / `查看 git 状态`
 
@@ -84,6 +86,14 @@ def plan_tool_call(task: str) -> ToolCall:
             tool_input={},
             strategy="inspect-workspace-state",
             next_action="先查看当前工作区状态，再决定后续读取、修改还是验证",
+        )
+
+    if lowered in {"undo_last_edit", "undo", "撤销最近一次修改", "撤销上一次修改"}:
+        return ToolCall(
+            tool_name="undo_last_edit",
+            tool_input={},
+            strategy="restore-last-checkpoint",
+            next_action="先恢复最近一次写入前备份，再检查文件是否回到预期状态",
         )
 
     for prefix in ("read_file ", "读取文件 "):
@@ -149,6 +159,7 @@ def execute_tool_call(
     workspace_root: Path,
     *,
     permission_gate: PermissionGate | None = None,
+    checkpoint_store: CheckpointStore | None = None,
 ) -> ToolExecutionResult:
     """执行一个最小工具调用。
 
@@ -162,6 +173,7 @@ def execute_tool_call(
         call.tool_input,
         workspace_root,
         permission_gate=permission_gate,
+        checkpoint_store=checkpoint_store,
     )
 
 
@@ -171,11 +183,13 @@ def execute_named_tool(
     workspace_root: Path,
     *,
     permission_gate: PermissionGate | None = None,
+    checkpoint_store: CheckpointStore | None = None,
 ) -> ToolExecutionResult:
     handlers = {
         "read_file": _run_read_file,
         "search": _run_search,
-        "edit": _run_edit,
+        "edit": lambda root, data: _run_edit(root, data, checkpoint_store=checkpoint_store),
+        "undo_last_edit": lambda root, data: _run_undo_last_edit(root, data, checkpoint_store=checkpoint_store),
         "bash": _run_bash,
         "git_status": _run_git_status,
     }
@@ -358,7 +372,22 @@ def _run_search(workspace_root: Path, tool_input: dict[str, Any]) -> ToolExecuti
     )
 
 
-def _run_edit(workspace_root: Path, tool_input: dict[str, Any]) -> ToolExecutionResult:
+def _run_edit(
+    workspace_root: Path,
+    tool_input: dict[str, Any],
+    *,
+    checkpoint_store: CheckpointStore | None,
+) -> ToolExecutionResult:
+    """执行最小文本替换，并在写入前保存最近一次 checkpoint。
+
+    这条链现在对应学习文档 5.5/9.1 提到的最小控制层:
+    permission gate 已在外层确认是否允许写入；
+    真正落盘前，这里负责把原文存成一个可撤销的 checkpoint。
+    """
+
+    if checkpoint_store is None:
+        raise RuntimeError("checkpoint store is required for edit")
+
     path = _resolve_workspace_path(workspace_root, str(tool_input["path"]))
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"file not found: {path.relative_to(workspace_root.resolve())}")
@@ -373,6 +402,7 @@ def _run_edit(workspace_root: Path, tool_input: dict[str, Any]) -> ToolExecution
         raise ValueError("old_text not found in target file")
 
     updated = original.replace(old_text, new_text, 1)
+    checkpoint = checkpoint_store.save_latest_edit(workspace_root, path, original)
     path.write_text(updated, encoding="utf-8")
     relative_path = str(path.relative_to(workspace_root.resolve()))
     return ToolExecutionResult(
@@ -382,9 +412,52 @@ def _run_edit(workspace_root: Path, tool_input: dict[str, Any]) -> ToolExecution
             "replacements": 1,
             "old_text": old_text,
             "new_text": new_text,
+            "checkpoint": {
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "created_at": checkpoint.created_at,
+            },
         },
-        assistant_message=f"已按最小替换规则更新 `{relative_path}`，可以继续做验证或查看 diff。",
+        assistant_message=(
+            f"已按最小替换规则更新 `{relative_path}`，并在写入前保存 checkpoint "
+            f"`{checkpoint.checkpoint_id}`，现在可以继续做验证、查看 diff 或执行 `undo_last_edit`。"
+        ),
         summary=f"edited file {relative_path}",
+    )
+
+
+def _run_undo_last_edit(
+    workspace_root: Path,
+    tool_input: dict[str, Any],
+    *,
+    checkpoint_store: CheckpointStore | None,
+) -> ToolExecutionResult:
+    """恢复最近一次 `edit` 写入前的文本快照。
+
+    当前实现故意只做“最近一次”:
+    这样先把 checkpoint -> undo 这条控制链闭环跑通，
+    不抢跑到多层撤销栈、批量 patch 回滚或 git 级恢复。
+    """
+
+    del tool_input
+    if checkpoint_store is None:
+        raise RuntimeError("checkpoint store is required for undo_last_edit")
+
+    restored = checkpoint_store.undo_last_edit(workspace_root)
+    return ToolExecutionResult(
+        status="ok",
+        tool_output={
+            "path": restored.relative_path,
+            "restored": True,
+            "checkpoint": {
+                "checkpoint_id": restored.checkpoint_id,
+                "restored_at": restored.restored_at,
+            },
+        },
+        assistant_message=(
+            f"已从最近一次 checkpoint 恢复 `{restored.relative_path}`。"
+            "当前最小控制层只支持撤销最近一次修改，后续再扩成多步恢复。"
+        ),
+        summary=f"restored file {restored.relative_path} from latest checkpoint",
     )
 
 
