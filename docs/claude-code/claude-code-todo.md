@@ -30,7 +30,7 @@
 
 ## Phase 4. 补控制层
 - [x] 给 `bash` 和 `edit` 加 permission gate，先做最简单的 confirm/deny 交互。见“5.5 Safety / Boundaries”。落实见 [reproductions/claude-code/claude_code/permissions.py](../../reproductions/claude-code/claude_code/permissions.py)、[reproductions/claude-code/claude_code/tools.py](../../reproductions/claude-code/claude_code/tools.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py)、[reproductions/claude-code/claude_code/cli.py](../../reproductions/claude-code/claude_code/cli.py)、[reproductions/claude-code/tests/test_cli.py](../../reproductions/claude-code/tests/test_cli.py) 和 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md)。
-- [ ] 做文件 checkpoint：写入前备份、支持撤销最近一次修改。见“5.5 Safety / Boundaries”和“9.1 第一阶段必须有”。
+- [x] 做文件 checkpoint：写入前备份、支持撤销最近一次修改。见“5.5 Safety / Boundaries”和“9.1 第一阶段必须有”。落实见 [reproductions/claude-code/claude_code/checkpoints.py](../../reproductions/claude-code/claude_code/checkpoints.py)、[reproductions/claude-code/claude_code/tools.py](../../reproductions/claude-code/claude_code/tools.py)、[reproductions/claude-code/claude_code/runtime.py](../../reproductions/claude-code/claude_code/runtime.py)、[reproductions/claude-code/claude_code/app_service.py](../../reproductions/claude-code/claude_code/app_service.py)、[reproductions/claude-code/tests/test_cli.py](../../reproductions/claude-code/tests/test_cli.py) 和 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md)。
 - [ ] 把 allowlist / denylist 配置做成单独模块，避免以后和 runtime 耦合。见“5.5 Safety / Boundaries”。
 
 ## Phase 5. 验证最小闭环

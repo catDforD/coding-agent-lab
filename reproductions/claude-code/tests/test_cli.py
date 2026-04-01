@@ -139,6 +139,75 @@ class CliEntryTest(unittest.TestCase):
             tool_output = payload["events"][2]["payload"]["tool_output"]
             self.assertEqual(tool_output["path"], "src/sample.txt")
             self.assertEqual(tool_output["replacements"], 1)
+            self.assertIn("checkpoint", tool_output)
+            self.assertTrue((state_dir / "checkpoints" / "latest_edit.json").exists())
+
+    def test_undo_last_edit_restores_latest_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            workspace_root = root / "workspace"
+            state_dir = root / "state"
+            workspace_root.mkdir()
+            self.make_workspace(workspace_root)
+
+            edit_result = self.run_cli(
+                "--tool-direct",
+                "edit src/sample.txt -- beta -- gamma",
+                state_dir=state_dir,
+                workspace_root=workspace_root,
+                stdin_text="y\n",
+            )
+            self.assertEqual(edit_result.returncode, 0, edit_result.stderr)
+            self.assertEqual(
+                (workspace_root / "src" / "sample.txt").read_text(encoding="utf-8"),
+                "alpha\ngamma\n",
+            )
+
+            undo_result = self.run_cli(
+                "--tool-direct",
+                "undo_last_edit",
+                state_dir=state_dir,
+                workspace_root=workspace_root,
+            )
+
+            self.assertEqual(undo_result.returncode, 0, undo_result.stderr)
+            self.assertIn("executed_tools: undo_last_edit", undo_result.stdout)
+            self.assertEqual(
+                (workspace_root / "src" / "sample.txt").read_text(encoding="utf-8"),
+                "alpha\nbeta\n",
+            )
+            self.assertFalse((state_dir / "checkpoints" / "latest_edit.json").exists())
+
+            payload = self.read_session_payload(state_dir)
+            tool_output = payload["events"][2]["payload"]["tool_output"]
+            self.assertEqual(tool_output["path"], "src/sample.txt")
+            self.assertTrue(tool_output["restored"])
+            self.assertIn("checkpoint", tool_output)
+
+    def test_undo_last_edit_fails_without_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            workspace_root = root / "workspace"
+            state_dir = root / "state"
+            workspace_root.mkdir()
+            self.make_workspace(workspace_root)
+
+            result = self.run_cli(
+                "--tool-direct",
+                "undo_last_edit",
+                state_dir=state_dir,
+                workspace_root=workspace_root,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("executed_tools: undo_last_edit", result.stdout)
+
+            payload = self.read_session_payload(state_dir)
+            self.assertEqual(payload["events"][2]["payload"]["status"], "error")
+            self.assertEqual(
+                payload["events"][2]["payload"]["tool_output"]["error_type"],
+                "FileNotFoundError",
+            )
 
     def test_edit_tool_stops_when_user_denies_permission(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

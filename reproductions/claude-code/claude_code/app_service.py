@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .checkpoints import CheckpointStore
 from .config import ConfigError, load_openai_settings, workspace_root
 from .model_client import LiveOpenAIClient, ModelClientError
 from .permissions import PermissionGate
@@ -43,6 +44,8 @@ class ClaudeCodeAppService:
     def __init__(self, workspace: Path, store: SessionStore) -> None:
         self.workspace = workspace
         self.store = store
+        # CLI / Web API 共享同一个 state dir，这样 checkpoint 和 session 能稳定对齐。
+        self.checkpoints = CheckpointStore(store.root / "checkpoints")
 
     @classmethod
     def for_current_workspace(cls) -> "ClaudeCodeAppService":
@@ -122,6 +125,7 @@ class ClaudeCodeAppService:
             max_steps=max_steps,
             model_client=model_client,
             permission_gate=permission_gate,
+            checkpoint_store=self.checkpoints,
         )
         self.store.save(record)
         return loop_result
