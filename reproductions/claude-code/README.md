@@ -107,12 +107,13 @@ reproductions/claude-code/
 
 ### 当前 control layer 边界
 
-Phase 4 当前已补上两条最小控制链：
+Phase 4 当前已补上三条最小控制链：
 - permission gate
 - 只拦截高风险工具 `edit` 和 `bash`
-- 只在 CLI 的 `--tool-direct` 路径里做同步终端确认
+- 会先读取独立的 allowlist / denylist 配置；命中 denylist 直接拒绝，命中 allowlist 直接放行
+- 规则没命中时，才在 CLI 的 `--tool-direct` 路径里做同步终端确认
 - 用户输入 `y` / `yes` 才执行；其他输入或没有确认时一律拒绝
-- 拒绝结果会继续写入统一事件流，便于后续接 checkpoint、allowlist / denylist 和 hooks
+- 自动放行 / 自动拒绝 / 手动确认的结果都会继续写入统一事件流，便于后续接 hooks
 
 - checkpoint / undo
 - `edit` 写入前会把原始文本保存到 state dir 下的 `checkpoints/latest_edit.json`
@@ -120,9 +121,30 @@ Phase 4 当前已补上两条最小控制链：
 - checkpoint 先和 session store 共用同一个 state dir，避免控制层状态散落到 workspace 里
 
 当前还没有做的部分：
-- 配置化 allowlist / denylist
 - live 模式下的写入工具开放
 - Web UI 里的确认交互
+- 更完整的 settings hierarchy、managed settings 和 hooks 联动
+
+当前 allowlist / denylist 的最小文件协议是：
+
+```json
+{
+  "bash": {
+    "allowlist": ["python -m pytest", "printf"],
+    "denylist": ["rm ", "git push"]
+  },
+  "edit": {
+    "allowlist": ["docs/", "src/"],
+    "denylist": [".env", "secrets/"]
+  }
+}
+```
+
+规则加载顺序和边界如下：
+- 默认读取 workspace 下的 `.claude-code/permission-rules.json`
+- 若设置 `CLAUDE_CODE_PERMISSION_RULES`，会优先读取该路径
+- 当前匹配方式是简单前缀匹配；目录规则建议带 `/`
+- 当前优先级固定为 `denylist > allowlist > interactive confirm`
 
 ### 当前主循环边界
 
@@ -132,6 +154,7 @@ Phase 4 当前已补上两条最小控制链：
 CLI 参数 -> session store.events -> runtime.gather_context
 -> context_builder.load_rules/build_prompt_context
 -> live Responses agent / tool-direct planner
+-> permission_rules.load / permission gate
 -> tool execution / checkpoint store
 -> session events / terminal summary
 -> session JSON / 终端摘要输出
@@ -144,6 +167,7 @@ CLI 参数 -> session store.events -> runtime.gather_context
 - `compaction`: 旧工具输出优先不再原样进入 transcript，更老的会话会收成一段 deterministic 摘要；最近少量工具结果仍单独保留原文
 - `act/live`: 通过 Responses API 让模型决定是否调用只读工具，并在多轮 `function_call -> function_call_output` 后返回最终答案
 - `act/tool-direct`: 把任务文本折叠成显式工具调用，作为 deterministic/debug 入口
+- `permission_rules`: 从独立 JSON 文件读取 `bash` / `edit` 的 allowlist / denylist，避免把控制配置写死在 runtime 里
 - `checkpoint`: `edit` 写入前先落最近一次备份，`undo_last_edit` 再从同一份备份恢复
 - `emit events`: 把 live/tool-direct 产生的 `tool_call`、`tool_result`、`model_response` 追加回 session
 - `verify`: 区分 `completed`、`api-error`、`invalid-tool-call`、`max-steps-reached`

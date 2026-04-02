@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .checkpoints import CheckpointStore
-from .permissions import PermissionGate
+from .permissions import CONTROLLED_TOOL_NAMES, PermissionDecision, PermissionGate
 
 READ_ONLY_TOOL_NAMES = ("read_file", "search", "git_status")
 
@@ -197,6 +197,7 @@ def execute_named_tool(
         raise ValueError(f"unsupported tool: {tool_name}")
 
     # Phase 4 先把写入和命令执行纳入最小 permission gate，后续再继续扩成策略模块。
+    decision: PermissionDecision | None = None
     if permission_gate is not None:
         decision = permission_gate.confirm_tool_use(tool_name, tool_input)
         if not decision.allowed:
@@ -208,6 +209,7 @@ def execute_named_tool(
                     "permission": {
                         "status": "denied",
                         "reason": decision.reason,
+                        "source": decision.source,
                     },
                 },
                 assistant_message=(
@@ -219,7 +221,7 @@ def execute_named_tool(
 
     handler = handlers[tool_name]
     try:
-        return handler(workspace_root, tool_input)
+        result = handler(workspace_root, tool_input)
     except Exception as exc:  # noqa: BLE001 - 这里先统一折叠成最小 tool_result
         return ToolExecutionResult(
             status="error",
@@ -235,6 +237,10 @@ def execute_named_tool(
             ),
             summary=f"tool {tool_name} failed with {type(exc).__name__}",
         )
+
+    if decision is not None and tool_name in CONTROLLED_TOOL_NAMES:
+        _attach_permission_metadata(result.tool_output, decision)
+    return result
 
 
 def live_tool_schemas() -> list[dict[str, Any]]:
@@ -282,6 +288,14 @@ def live_tool_schemas() -> list[dict[str, Any]]:
             },
         },
     ]
+
+
+def _attach_permission_metadata(tool_output: dict[str, Any], decision: PermissionDecision) -> None:
+    tool_output["permission"] = {
+        "status": "allowed" if decision.allowed else "denied",
+        "reason": decision.reason,
+        "source": decision.source,
+    }
 
 
 def tool_output_for_model(tool_name: str, result: ToolExecutionResult) -> dict[str, Any]:
