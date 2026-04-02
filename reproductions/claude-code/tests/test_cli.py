@@ -59,6 +59,16 @@ class CliEntryTest(unittest.TestCase):
         session_path = state_dir / "sessions" / f"{session_id}.json"
         return json.loads(session_path.read_text(encoding="utf-8"))
 
+    def write_permission_rules(self, workspace_root: Path, payload: dict[str, object]) -> Path:
+        rules_dir = workspace_root / ".claude-code"
+        rules_dir.mkdir(parents=True, exist_ok=True)
+        path = rules_dir / "permission-rules.json"
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
     def test_read_file_tool_records_file_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -238,6 +248,76 @@ class CliEntryTest(unittest.TestCase):
                 payload["events"][2]["payload"]["tool_output"]["permission"]["status"],
                 "denied",
             )
+
+    def test_edit_tool_can_auto_allow_via_permission_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            workspace_root = root / "workspace"
+            state_dir = root / "state"
+            workspace_root.mkdir()
+            self.make_workspace(workspace_root)
+            rules_path = self.write_permission_rules(
+                workspace_root,
+                {
+                    "edit": {
+                        "allowlist": ["src/"],
+                    }
+                },
+            )
+
+            result = self.run_cli(
+                "--tool-direct",
+                "edit src/sample.txt -- beta -- gamma",
+                state_dir=state_dir,
+                workspace_root=workspace_root,
+                extra_env={"CLAUDE_CODE_PERMISSION_RULES": str(rules_path)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Permission required for tool `edit`.", result.stdout)
+            self.assertEqual(
+                (workspace_root / "src" / "sample.txt").read_text(encoding="utf-8"),
+                "alpha\ngamma\n",
+            )
+
+            payload = self.read_session_payload(state_dir)
+            tool_output = payload["events"][2]["payload"]["tool_output"]
+            self.assertEqual(tool_output["permission"]["status"], "allowed")
+            self.assertEqual(tool_output["permission"]["source"], "allowlist")
+
+    def test_bash_tool_can_auto_deny_via_permission_denylist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            workspace_root = root / "workspace"
+            state_dir = root / "state"
+            workspace_root.mkdir()
+            self.make_workspace(workspace_root)
+            rules_path = self.write_permission_rules(
+                workspace_root,
+                {
+                    "bash": {
+                        "denylist": ["printf"],
+                    }
+                },
+            )
+
+            result = self.run_cli(
+                "--tool-direct",
+                "bash",
+                "printf ready",
+                state_dir=state_dir,
+                workspace_root=workspace_root,
+                extra_env={"CLAUDE_CODE_PERMISSION_RULES": str(rules_path)},
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertNotIn("Permission required for tool `bash`.", result.stdout)
+
+            payload = self.read_session_payload(state_dir)
+            tool_output = payload["events"][2]["payload"]["tool_output"]
+            self.assertEqual(payload["events"][2]["payload"]["status"], "denied")
+            self.assertEqual(tool_output["permission"]["status"], "denied")
+            self.assertEqual(tool_output["permission"]["source"], "denylist")
 
     def test_bash_tool_records_command_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

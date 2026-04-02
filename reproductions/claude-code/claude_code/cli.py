@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from .app_service import ClaudeCodeAppService, RuntimeUnavailableError
+from .permission_rules import PermissionRulesError, load_permission_rules
 from .permissions import InteractivePermissionGate
 from .session_store import SessionRecord
 
@@ -46,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_task(raw_task: list[str]) -> str | None:
     task = " ".join(raw_task).strip()
     return task or None
+
+
 def create_or_resume_session(args: argparse.Namespace, service: ClaudeCodeAppService) -> tuple[str, SessionRecord]:
     task = resolve_task(args.task)
 
@@ -87,11 +90,16 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         status, record = create_or_resume_session(args, service)
-    except (FileNotFoundError, ValueError) as exc:
+        permission_gate = None
+        if args.tool_direct:
+            # CLI 参数 -> 独立规则模块 -> permission gate -> runtime/tool 层。
+            # 这里先只做最小文件配置加载，后续再扩成更完整的 settings hierarchy。
+            rule_set = load_permission_rules(service.workspace)
+            permission_gate = InteractivePermissionGate(rule_set=rule_set)
+    except (FileNotFoundError, PermissionRulesError, ValueError) as exc:
         parser.error(str(exc))
 
     try:
-        permission_gate = InteractivePermissionGate() if args.tool_direct else None
         loop_result = service.run_turn(
             record,
             tool_direct=args.tool_direct,
