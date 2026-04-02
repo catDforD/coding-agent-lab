@@ -1,8 +1,9 @@
-"""Claude Code cleanroom 的规则加载与 prompt/context builder。
+"""Claude Code cleanroom 的规则加载、compaction 与 prompt/context builder。
 
 这个文件落实 `docs/claude-code/claude-code-todo.md` 的:
 - Phase 3 第 1 点: 启动时加载项目 `CLAUDE.md`、用户级规则和简化版 `MEMORY.md`
 - Phase 3 第 2 点: 把规则文件、会话历史、最近工具输出拼成统一输入
+- Phase 3 第 3 点: 加一个最小 compaction 策略
 
 关键代码链:
 runtime.gather_context -> build_prompt_context -> model_client.create_response
@@ -12,7 +13,8 @@ runtime.gather_context -> build_prompt_context -> model_client.create_response
 - 5.3 Memory / Context
 
 当前取舍:
-- 先做最小可解释版 context packing，不抢跑到 Phase 3 第 3 点的真正 compaction。
+- 先做 deterministic 的最小 compaction，不引入额外摘要模型，也不做检索剪枝。
+- compaction 先严格遵循学习文档 5.3 的顺序: 旧工具输出优先裁掉，再补一段旧会话摘要。
 - `MEMORY.md` 先只读取前 200 行，对齐学习文档里的公开行为。
 - project rules 先按“从 workspace 向上查找 `CLAUDE.md`”实现，保证后续容易替换成更细的策略。
 """
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +36,8 @@ MEMORY_LINE_LIMIT = 200
 RECENT_TRANSCRIPT_LIMIT = 20
 RECENT_TOOL_OUTPUT_LIMIT = 3
 MAX_TOOL_OUTPUT_CHARS = 1200
+COMPACTION_EXCERPT_LIMIT = 160
+COMPACTION_SUMMARY_MESSAGE_LIMIT = 2
 
 
 @dataclass(frozen=True)
@@ -76,12 +81,32 @@ class LoadedRules:
 class PromptContextBundle:
     latest_task: str
     recent_tasks: list[str]
+    compacted_summary: str
     resume_transcript: str
     recent_tool_outputs: str
     rules: LoadedRules
     instructions: str
     initial_input_text: str
     summary: str
+
+
+@dataclass(frozen=True)
+class CompactionResult:
+    """最小 compaction 结果。
+
+    关键代码链:
+    session events -> compact_session_history -> PromptContextBundle -> model input
+
+    对应《claude-code-study.md》的 5.3:
+    - 旧工具输出优先裁掉
+    - 旧会话保留一段最小摘要
+    """
+
+    compacted_summary: str
+    recent_transcript: str
+    recent_tool_outputs: str
+    summarized_event_count: int
+    dropped_tool_output_count: int
 
 
 def build_prompt_context(
@@ -96,20 +121,15 @@ def build_prompt_context(
     - 输入是已经持久化的 session record 和当前 workspace
     - 输出是给模型客户端用的 instructions + 首轮 user input 文本
 
-    暂时不做真正的压缩策略，只控制选择哪些近端信息进入 prompt。
+    当前把 compaction 放在这个 builder 里，是为了把边界钉在
+    “session event log -> prompt input” 之间，后续可直接替换策略而不重写 runtime。
     """
 
     recent_user_events = record.recent_events(kind=USER_MESSAGE, limit=3)
     latest_task = recent_user_events[-1].payload.get("content", "") if recent_user_events else ""
     recent_tasks = [str(event.payload.get("content", "")) for event in recent_user_events]
 
-    transcript_events = list(record.recent_events(limit=RECENT_TRANSCRIPT_LIMIT))
-    if transcript_events and transcript_events[-1].kind == USER_MESSAGE:
-        transcript_events = transcript_events[:-1]
-
-    resume_transcript = render_transcript(transcript_events)
-    recent_tool_result_events = record.recent_events(kind=TOOL_RESULT, limit=RECENT_TOOL_OUTPUT_LIMIT)
-    recent_tool_outputs = render_recent_tool_outputs(recent_tool_result_events)
+    compaction = compact_session_history(record)
     rules = load_rules(workspace_root)
 
     sections = [
@@ -117,26 +137,63 @@ def build_prompt_context(
         f"Current task:\n{latest_task}",
         rules.render_for_prompt(),
     ]
-    if resume_transcript:
-        sections.append(f"Recent session transcript:\n{resume_transcript}")
-    if recent_tool_outputs:
-        sections.append(f"Recent tool outputs:\n{recent_tool_outputs}")
+    if compaction.compacted_summary:
+        sections.append(f"Compacted session summary:\n{compaction.compacted_summary}")
+    if compaction.recent_transcript:
+        sections.append(f"Recent session transcript:\n{compaction.recent_transcript}")
+    if compaction.recent_tool_outputs:
+        sections.append(f"Recent tool outputs:\n{compaction.recent_tool_outputs}")
+
+    compaction_summary = "no history compaction needed"
+    if compaction.summarized_event_count or compaction.dropped_tool_output_count:
+        compaction_summary = (
+            f"summarized {compaction.summarized_event_count} earlier event(s) "
+            f"and dropped {compaction.dropped_tool_output_count} old tool output(s)"
+        )
 
     summary = (
         f"loaded {len(recent_user_events)} recent user message(s), "
-        f"{len(recent_tool_result_events)} recent tool output(s), "
-        f"and {len(rules.documents)} rule file(s) for workspace context at {workspace_root.name}"
+        f"{len(rules.documents)} rule file(s), "
+        f"and {compaction_summary} for workspace context at {workspace_root.name}"
     )
 
     return PromptContextBundle(
         latest_task=latest_task,
         recent_tasks=recent_tasks,
-        resume_transcript=resume_transcript,
-        recent_tool_outputs=recent_tool_outputs,
+        compacted_summary=compaction.compacted_summary,
+        resume_transcript=compaction.recent_transcript,
+        recent_tool_outputs=compaction.recent_tool_outputs,
         rules=rules,
         instructions=_build_instructions(base_instructions),
         initial_input_text="\n\n".join(section for section in sections if section.strip()),
         summary=summary,
+    )
+
+
+def compact_session_history(record: SessionRecord) -> CompactionResult:
+    """把 session 历史压成“近端原文 + 远端摘要”。
+
+    当前实现只做最小闭环:
+    - 最近事件继续保留在 transcript
+    - 最近少量工具结果保留原文
+    - 更老的工具输出不再原样回灌，只在摘要里保留“做过什么”
+    """
+
+    history_events = list(record.events)
+    if history_events and history_events[-1].kind == USER_MESSAGE:
+        history_events = history_events[:-1]
+
+    recent_transcript_events = history_events[-RECENT_TRANSCRIPT_LIMIT:]
+    older_events = history_events[:-RECENT_TRANSCRIPT_LIMIT]
+    recent_tool_result_events = [event for event in history_events if event.kind == TOOL_RESULT][-RECENT_TOOL_OUTPUT_LIMIT:]
+    recent_tool_result_ids = {event.event_id for event in recent_tool_result_events}
+
+    return CompactionResult(
+        compacted_summary=summarize_older_events(older_events),
+        recent_transcript=render_transcript(recent_transcript_events, recent_tool_result_ids=recent_tool_result_ids),
+        recent_tool_outputs=render_recent_tool_outputs(recent_tool_result_events),
+        summarized_event_count=len(older_events),
+        dropped_tool_output_count=sum(1 for event in older_events if event.kind == TOOL_RESULT),
     )
 
 
@@ -175,8 +232,16 @@ def load_rules(workspace_root: Path) -> LoadedRules:
     return LoadedRules(documents=documents)
 
 
-def render_transcript(events: list[SessionEvent]) -> str:
+def render_transcript(events: list[SessionEvent], *, recent_tool_result_ids: set[str] | None = None) -> str:
+    """渲染近端 transcript。
+
+    边界说明:
+    - transcript 不再原样内嵌工具输出正文，避免旧工具结果挤占窗口。
+    - 真正保留原文的工具结果，统一下沉到 `Recent tool outputs` 区块。
+    """
+
     lines: list[str] = []
+    recent_tool_result_ids = recent_tool_result_ids or set()
     for event in events:
         payload = event.payload
         if event.kind == "user_message":
@@ -191,10 +256,8 @@ def render_transcript(events: list[SessionEvent]) -> str:
             status = payload.get("status", "")
             step_index = payload.get("step_index")
             prefix = f"Tool result step {step_index}" if step_index is not None else "Tool result"
-            lines.append(
-                f"{prefix}: {tool_name} status={status} "
-                f"{json.dumps(payload.get('tool_output', {}), ensure_ascii=False)}"
-            )
+            detail_note = "details kept below" if event.event_id in recent_tool_result_ids else "details omitted by compaction"
+            lines.append(f"{prefix}: {tool_name} status={status} ({detail_note})")
         elif event.kind == "model_response":
             lines.append(f"Assistant: {payload.get('content', '')}")
     return "\n".join(lines)
@@ -211,6 +274,51 @@ def render_recent_tool_outputs(events: list[SessionEvent]) -> str:
         prefix = f"step {step_index}" if step_index is not None else "recent"
         entries.append(f"{prefix} {tool_name} status={status}\n{tool_output}")
     return "\n\n".join(entries)
+
+
+def summarize_older_events(events: list[SessionEvent]) -> str:
+    """把更老的历史压成一段 deterministic 摘要。
+
+    这里先不用模型做摘要，避免在最小复现里再引入一个“摘要代理”。
+    """
+
+    if not events:
+        return ""
+
+    user_messages: list[str] = []
+    assistant_messages: list[str] = []
+    tool_activity: Counter[str] = Counter()
+    dropped_tool_output_count = 0
+
+    for event in events:
+        payload = event.payload
+        if event.kind == USER_MESSAGE:
+            user_messages.append(_truncate(str(payload.get("content", "")), COMPACTION_EXCERPT_LIMIT))
+        elif event.kind == "model_response":
+            assistant_messages.append(_truncate(str(payload.get("content", "")), COMPACTION_EXCERPT_LIMIT))
+        elif event.kind == TOOL_RESULT:
+            tool_activity[str(payload.get("tool_name", "unknown"))] += 1
+            dropped_tool_output_count += 1
+
+    lines = ["Older session state was compacted to keep the prompt focused on recent context."]
+    if user_messages:
+        lines.append(
+            "Earlier user tasks: "
+            + " | ".join(user_messages[-COMPACTION_SUMMARY_MESSAGE_LIMIT:])
+        )
+    if assistant_messages:
+        lines.append(
+            "Earlier assistant replies: "
+            + " | ".join(assistant_messages[-COMPACTION_SUMMARY_MESSAGE_LIMIT:])
+        )
+    if tool_activity:
+        lines.append(
+            "Earlier tool activity without raw outputs: "
+            + ", ".join(f"{tool_name} x{count}" for tool_name, count in sorted(tool_activity.items()))
+        )
+    if dropped_tool_output_count:
+        lines.append(f"Dropped raw tool outputs during compaction: {dropped_tool_output_count}")
+    return "\n".join(lines)
 
 
 def _build_instructions(base_instructions: str) -> str:

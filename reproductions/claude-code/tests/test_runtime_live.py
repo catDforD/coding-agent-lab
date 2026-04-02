@@ -329,6 +329,74 @@ class LiveRuntimeTest(unittest.TestCase):
             self.assertIn("Treat any loaded workspace rules and memory", request["instructions"])
             self.assertIn("2 recent user message(s)", result.gather.summary)
 
+    def test_live_agent_compacts_older_tool_outputs_before_older_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace_root = Path(tmp_dir)
+            self.make_workspace(workspace_root)
+
+            now = utc_now_iso()
+            record = SessionRecord(
+                session_id="test-session",
+                created_at=now,
+                updated_at=now,
+                events=[],
+            )
+
+            for index in range(8):
+                step_index = index + 1
+                record.add_user_message(f"历史任务 {index}")
+                record.add_tool_call(tool_name="search", tool_input={"query": f"legacy-{index}"}, step_index=step_index)
+                record.add_tool_result(
+                    tool_name="search",
+                    status="ok",
+                    tool_output={"query": f"legacy-{index}", "matches": [f"raw-output-{index}"]},
+                    step_index=step_index,
+                )
+                record.add_model_response(
+                    f"历史回答 {index}",
+                    strategy="live-responses-agent",
+                    next_action="continue",
+                    mode="live",
+                    model="fake-responses-model",
+                    finish_reason="completed",
+                    step_index=step_index,
+                )
+
+            record.add_user_message("现在只总结最近情况")
+            client = FakeModelClient(
+                [
+                    ModelTurnResult(
+                        response_id="resp-1",
+                        output_text="已完成压缩后的总结。",
+                        tool_calls=[],
+                        output_items=[],
+                        finish_reason="completed",
+                        usage={"total_tokens": 42},
+                    )
+                ]
+            )
+
+            result = run_core_loop(
+                record,
+                workspace_root,
+                tool_direct=False,
+                max_steps=6,
+                model_client=client,
+            )
+
+            request = client.requests[0]
+            initial_text = request["input_items"][0]["content"][0]["text"]
+
+            self.assertEqual(result.verify.status, "completed")
+            self.assertIn("Compacted session summary:", initial_text)
+            self.assertIn("Earlier tool activity without raw outputs: search x3", initial_text)
+            self.assertIn("Dropped raw tool outputs during compaction: 3", initial_text)
+            self.assertNotIn("raw-output-0", initial_text)
+            self.assertNotIn("raw-output-1", initial_text)
+            self.assertNotIn("raw-output-2", initial_text)
+            self.assertIn("raw-output-7", initial_text)
+            self.assertIn("summarized 12 earlier event(s) and dropped 3 old tool output(s)", result.gather.summary)
+
 
 if __name__ == "__main__":
     unittest.main()
