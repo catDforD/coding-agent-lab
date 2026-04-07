@@ -499,6 +499,7 @@ class CliEntryTest(unittest.TestCase):
                     tool_direct: bool,
                     max_steps: int,
                     permission_gate=None,
+                    text_delta_callback=None,
                 ) -> LoopResult:
                     self.permission_gate = permission_gate
                     return LoopResult(
@@ -536,6 +537,71 @@ class CliEntryTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertIsNotNone(fake_service.permission_gate)
+
+    def test_live_cli_prints_streamed_text_before_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace_root = Path(tmp_dir)
+            self.make_workspace(workspace_root)
+
+            class FakeService:
+                def __init__(self, workspace: Path, record: SessionRecord) -> None:
+                    self.workspace = workspace
+                    self.record = record
+
+                def create_session(self, task: str) -> SessionRecord:
+                    self.record = CliEntryTest.make_record(self, task)
+                    return self.record
+
+                def run_turn(
+                    self,
+                    record: SessionRecord,
+                    *,
+                    tool_direct: bool,
+                    max_steps: int,
+                    permission_gate=None,
+                    text_delta_callback=None,
+                ) -> LoopResult:
+                    if text_delta_callback is not None:
+                        text_delta_callback("你好")
+                        text_delta_callback("！")
+                    return LoopResult(
+                        gather=GatherPhaseResult(
+                            latest_task=record.user_tasks[-1]["content"],
+                            recent_tasks=[],
+                            resume_transcript="",
+                            recent_tool_outputs="",
+                            prompt_instructions="",
+                            prompt_input_text="",
+                            summary="ok",
+                        ),
+                        act=ActPhaseResult(
+                            mode="live",
+                            strategy="live-responses-agent",
+                            model="fake-live",
+                            step_count=1,
+                            executed_tools=[],
+                            finish_reason="completed",
+                            status="ok",
+                            final_output="你好！",
+                            summary="ok",
+                        ),
+                        verify=VerifyPhaseResult(status="completed", summary="ok"),
+                        emitted_events=[],
+                    )
+
+            fake_service = FakeService(workspace_root, self.make_record("placeholder"))
+            stdout = io.StringIO()
+            with (
+                patch.object(cli.ClaudeCodeAppService, "for_current_workspace", return_value=fake_service),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                exit_code = cli.main(["请直接回答 hi"])
+
+            self.assertEqual(exit_code, 0)
+            rendered = stdout.getvalue()
+            self.assertIn("你好！\nstatus: created", rendered)
+            self.assertNotIn("assistant_response:\n你好！", rendered)
 
 
 if __name__ == "__main__":

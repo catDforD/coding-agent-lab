@@ -7,10 +7,43 @@ from pathlib import Path
 from unittest.mock import patch
 
 from claude_code.checkpoints import CheckpointStore
-from claude_code.model_client import FakeModelClient, ModelTurnResult, ToolRequest
+from claude_code.model_client import (
+    FakeModelClient,
+    ModelTextDeltaEvent,
+    ModelTurnCompletedEvent,
+    ModelTurnResult,
+    ToolRequest,
+)
 from claude_code.permissions import InteractivePermissionGate
 from claude_code.runtime import run_core_loop
 from claude_code.session_store import SessionRecord, utc_now_iso
+
+
+class FakeStreamingModelClient:
+    def __init__(self, turns: list[list[object]], *, model_name: str = "fake-streaming-model") -> None:
+        self._turns = [list(turn) for turn in turns]
+        self.model_name = model_name
+        self.requests: list[dict[str, object]] = []
+
+    def stream_response(
+        self,
+        *,
+        instructions: str,
+        input_items: list[dict[str, object]],
+        tools: list[dict[str, object]],
+        previous_response_id: str | None = None,
+    ):
+        self.requests.append(
+            {
+                "instructions": instructions,
+                "input_items": input_items,
+                "tools": tools,
+                "previous_response_id": previous_response_id,
+            }
+        )
+        if not self._turns:
+            raise AssertionError("fake streaming model has no scripted turn left")
+        return iter(self._turns.pop(0))
 
 
 class LiveRuntimeTest(unittest.TestCase):
@@ -60,6 +93,46 @@ class LiveRuntimeTest(unittest.TestCase):
             self.assertEqual(result.act.final_output, "hi")
             self.assertEqual(result.act.executed_tools, [])
             self.assertEqual(record.events[-1].payload["mode"], "live")
+
+    def test_live_agent_streams_text_and_still_records_final_model_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace_root = Path(tmp_dir)
+            self.make_workspace(workspace_root)
+            record = self.make_record("请直接回答 hi")
+            client = FakeStreamingModelClient(
+                [
+                    [
+                        ModelTextDeltaEvent(delta="h"),
+                        ModelTextDeltaEvent(delta="i"),
+                        ModelTurnCompletedEvent(
+                            result=ModelTurnResult(
+                                response_id="resp-stream-1",
+                                output_text="hi",
+                                tool_calls=[],
+                                output_items=[],
+                                finish_reason="completed",
+                                usage={"total_tokens": 12},
+                            )
+                        ),
+                    ]
+                ]
+            )
+            streamed: list[str] = []
+
+            result = run_core_loop(
+                record,
+                workspace_root,
+                tool_direct=False,
+                max_steps=6,
+                model_client=client,
+                text_delta_callback=streamed.append,
+            )
+
+            self.assertEqual("".join(streamed), "hi")
+            self.assertEqual(result.verify.status, "completed")
+            self.assertEqual(result.act.final_output, "hi")
+            self.assertEqual(record.events[-1].kind, "model_response")
+            self.assertEqual(record.events[-1].payload["content"], "hi")
 
     def test_live_agent_can_search_then_read_then_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -147,6 +220,74 @@ class LiveRuntimeTest(unittest.TestCase):
                 [event.kind for event in result.emitted_events],
                 ["tool_call", "tool_result", "tool_call", "tool_result", "model_response"],
             )
+
+    def test_live_agent_streaming_keeps_tool_loop_intact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace_root = Path(tmp_dir)
+            self.make_workspace(workspace_root)
+            record = self.make_record("请解释 SessionStore 在哪里")
+            client = FakeStreamingModelClient(
+                [
+                    [
+                        ModelTextDeltaEvent(delta="先看一下。"),
+                        ModelTurnCompletedEvent(
+                            result=ModelTurnResult(
+                                response_id="resp-stream-1",
+                                output_text="先看一下。",
+                                tool_calls=[
+                                    ToolRequest(
+                                        call_id="call-1",
+                                        name="search",
+                                        arguments={"query": "SessionStore"},
+                                    )
+                                ],
+                                output_items=[
+                                    {
+                                        "type": "function_call",
+                                        "call_id": "call-1",
+                                        "name": "search",
+                                        "arguments": "{\"query\": \"SessionStore\"}",
+                                    }
+                                ],
+                                finish_reason="tool_calls",
+                                usage=None,
+                            )
+                        ),
+                    ],
+                    [
+                        ModelTextDeltaEvent(delta="SessionStore 在 notes.md。"),
+                        ModelTurnCompletedEvent(
+                            result=ModelTurnResult(
+                                response_id="resp-stream-2",
+                                output_text="SessionStore 在 notes.md。",
+                                tool_calls=[],
+                                output_items=[],
+                                finish_reason="completed",
+                                usage={"total_tokens": 18},
+                            )
+                        ),
+                    ],
+                ]
+            )
+            streamed: list[str] = []
+
+            result = run_core_loop(
+                record,
+                workspace_root,
+                tool_direct=False,
+                max_steps=6,
+                model_client=client,
+                text_delta_callback=streamed.append,
+            )
+
+            self.assertEqual(streamed, ["先看一下。", "SessionStore 在 notes.md。"])
+            self.assertEqual(result.verify.status, "completed")
+            self.assertEqual(result.act.executed_tools, ["search"])
+            self.assertEqual(
+                [event.kind for event in result.emitted_events],
+                ["tool_call", "tool_result", "model_response"],
+            )
+            self.assertEqual(record.events[-1].payload["content"], "SessionStore 在 notes.md。")
 
     def test_live_agent_rejects_unknown_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

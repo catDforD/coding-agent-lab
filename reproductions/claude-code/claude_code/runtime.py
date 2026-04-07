@@ -10,11 +10,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .checkpoints import CheckpointStore
 from .context_builder import build_prompt_context
-from .model_client import ModelClient, ModelClientError
+from .model_client import (
+    ModelClient,
+    ModelClientError,
+    ModelTextDeltaEvent,
+    ModelTurnCompletedEvent,
+    ModelTurnResult,
+)
 from .permissions import PermissionGate
 from .session_store import SessionEvent, SessionRecord
 from .tools import (
@@ -66,7 +72,7 @@ class LoopResult:
     verify: VerifyPhaseResult
     emitted_events: list[SessionEvent]
 
-    def render_summary(self) -> str:
+    def render_summary(self, *, include_assistant_response: bool = True) -> str:
         event_kinds = ",".join(event.kind for event in self.emitted_events) or "<none>"
         tool_names = ",".join(self.act.executed_tools) or "<none>"
         lines = [
@@ -82,9 +88,14 @@ class LoopResult:
             f"verify_summary: {self.verify.summary}",
             f"emitted_event_count: {len(self.emitted_events)}",
             f"emitted_event_kinds: {event_kinds}",
-            "assistant_response:",
-            self.act.final_output or "<none>",
         ]
+        if include_assistant_response:
+            lines.extend(
+                [
+                    "assistant_response:",
+                    self.act.final_output or "<none>",
+                ]
+            )
         return "\n".join(lines)
 
 
@@ -120,6 +131,7 @@ def act_on_context(
     model_client: ModelClient | None = None,
     permission_gate: PermissionGate | None = None,
     checkpoint_store: CheckpointStore | None = None,
+    text_delta_callback: Callable[[str], None] | None = None,
 ) -> tuple[ActPhaseResult, list[SessionEvent]]:
     if tool_direct:
         return _act_via_tool_direct(
@@ -139,6 +151,7 @@ def act_on_context(
         max_steps=max_steps,
         permission_gate=permission_gate,
         checkpoint_store=checkpoint_store,
+        text_delta_callback=text_delta_callback,
     )
 
 
@@ -205,6 +218,7 @@ def _act_via_live_agent(
     max_steps: int,
     permission_gate: PermissionGate | None = None,
     checkpoint_store: CheckpointStore | None = None,
+    text_delta_callback: Callable[[str], None] | None = None,
 ) -> tuple[ActPhaseResult, list[SessionEvent]]:
     emitted: list[SessionEvent] = []
     executed_tools: list[str] = []
@@ -214,10 +228,12 @@ def _act_via_live_agent(
 
     for step_index in range(1, max_steps + 1):
         try:
-            turn = model_client.create_response(
+            turn = _consume_live_model_turn(
+                model_client,
                 instructions=gathered.prompt_instructions,
                 input_items=running_input,
                 tools=live_tool_schemas(include_controlled_tools=include_controlled_tools),
+                text_delta_callback=text_delta_callback,
             )
         except ModelClientError as exc:
             return (
@@ -335,6 +351,40 @@ def _act_via_live_agent(
     )
 
 
+def _consume_live_model_turn(
+    model_client: ModelClient,
+    *,
+    instructions: str,
+    input_items: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    text_delta_callback: Callable[[str], None] | None,
+) -> ModelTurnResult:
+    stream_response = getattr(model_client, "stream_response", None)
+    if not callable(stream_response):
+        return model_client.create_response(
+            instructions=instructions,
+            input_items=input_items,
+            tools=tools,
+        )
+
+    final_turn: ModelTurnResult | None = None
+    for event in stream_response(
+        instructions=instructions,
+        input_items=input_items,
+        tools=tools,
+    ):
+        if isinstance(event, ModelTextDeltaEvent):
+            if text_delta_callback is not None and event.delta:
+                text_delta_callback(event.delta)
+            continue
+        if isinstance(event, ModelTurnCompletedEvent):
+            final_turn = event.result
+
+    if final_turn is None:
+        raise ModelClientError("stream_response finished without a completed model turn")
+    return final_turn
+
+
 def _build_initial_user_input(gathered: GatherPhaseResult) -> dict[str, Any]:
     return {
         "role": "user",
@@ -418,6 +468,7 @@ def run_core_loop(
     model_client: ModelClient | None = None,
     permission_gate: PermissionGate | None = None,
     checkpoint_store: CheckpointStore | None = None,
+    text_delta_callback: Callable[[str], None] | None = None,
 ) -> LoopResult:
     gathered = gather_context(
         record,
@@ -433,6 +484,7 @@ def run_core_loop(
         model_client=model_client,
         permission_gate=permission_gate,
         checkpoint_store=checkpoint_store,
+        text_delta_callback=text_delta_callback,
     )
     verified = verify_action(gathered, acted)
     return LoopResult(

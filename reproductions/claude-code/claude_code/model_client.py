@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from .config import OpenAISettings
 
@@ -28,6 +28,16 @@ class ModelTurnResult:
     output_items: list[dict[str, Any]]
     finish_reason: str
     usage: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class ModelTextDeltaEvent:
+    delta: str
+
+
+@dataclass(frozen=True)
+class ModelTurnCompletedEvent:
+    result: ModelTurnResult
 
 
 class ModelClient(Protocol):
@@ -59,6 +69,7 @@ class LiveOpenAIClient:
             base_url=settings.base_url,
         )
         self.model_name = settings.model
+        self._base_url = settings.base_url
 
     def create_response(
         self,
@@ -70,19 +81,82 @@ class LiveOpenAIClient:
     ) -> ModelTurnResult:
         try:
             response = self._client.responses.create(
-                model=self.model_name,
-                instructions=instructions,
-                input=input_items,
-                previous_response_id=previous_response_id,
-                store=True,
-                tools=tools,
-                tool_choice="auto",
-                parallel_tool_calls=True,
+                **self._response_request_kwargs(
+                    instructions=instructions,
+                    input_items=input_items,
+                    tools=tools,
+                    previous_response_id=previous_response_id,
+                )
             )
         except Exception as exc:  # noqa: BLE001 - SDK/网络/服务错误统一折叠
             raise ModelClientError(f"responses.create failed: {type(exc).__name__}: {exc}") from exc
 
-        return _normalize_response(response)
+        normalized = _normalize_response(response)
+        if _is_empty_completed_response(normalized):
+            raise _empty_completed_response_error(self.model_name, self._base_url)
+        return normalized
+
+    def stream_response(
+        self,
+        *,
+        instructions: str,
+        input_items: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        previous_response_id: str | None = None,
+    ) -> Iterator[ModelTextDeltaEvent | ModelTurnCompletedEvent]:
+        accumulator = _StreamTurnAccumulator()
+
+        try:
+            with self._client.responses.stream(
+                **self._response_request_kwargs(
+                    instructions=instructions,
+                    input_items=input_items,
+                    tools=tools,
+                    previous_response_id=previous_response_id,
+                )
+            ) as stream:
+                saw_completed = False
+
+                for event in stream:
+                    accumulator.observe(event)
+                    event_type = str(_value(event, "type", ""))
+                    if event_type == "response.output_text.delta":
+                        yield ModelTextDeltaEvent(delta=str(_value(event, "delta", "")))
+                        continue
+                    if event_type != "response.completed":
+                        continue
+
+                    result = accumulator.build_result(_value(event, "response"))
+                    if _is_empty_completed_response(result):
+                        raise _empty_completed_response_error(self.model_name, self._base_url)
+                    saw_completed = True
+                    yield ModelTurnCompletedEvent(result=result)
+
+                if not saw_completed:
+                    raise ModelClientError("responses.stream ended before `response.completed`")
+        except ModelClientError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - SDK/网络/服务错误统一折叠
+            raise ModelClientError(f"responses.stream failed: {type(exc).__name__}: {exc}") from exc
+
+    def _response_request_kwargs(
+        self,
+        *,
+        instructions: str,
+        input_items: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        previous_response_id: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "model": self.model_name,
+            "instructions": instructions,
+            "input": input_items,
+            "previous_response_id": previous_response_id,
+            "store": True,
+            "tools": tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        }
 
 
 class FakeModelClient:
@@ -101,6 +175,41 @@ class FakeModelClient:
         tools: list[dict[str, Any]],
         previous_response_id: str | None = None,
     ) -> ModelTurnResult:
+        self._record_request(
+            instructions=instructions,
+            input_items=input_items,
+            tools=tools,
+            previous_response_id=previous_response_id,
+        )
+        return self._next_turn()
+
+    def stream_response(
+        self,
+        *,
+        instructions: str,
+        input_items: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        previous_response_id: str | None = None,
+    ) -> Iterator[ModelTextDeltaEvent | ModelTurnCompletedEvent]:
+        self._record_request(
+            instructions=instructions,
+            input_items=input_items,
+            tools=tools,
+            previous_response_id=previous_response_id,
+        )
+        turn = self._next_turn()
+        if turn.output_text:
+            yield ModelTextDeltaEvent(delta=turn.output_text)
+        yield ModelTurnCompletedEvent(result=turn)
+
+    def _record_request(
+        self,
+        *,
+        instructions: str,
+        input_items: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        previous_response_id: str | None,
+    ) -> None:
         self.requests.append(
             {
                 "instructions": instructions,
@@ -109,9 +218,99 @@ class FakeModelClient:
                 "previous_response_id": previous_response_id,
             }
         )
+
+    def _next_turn(self) -> ModelTurnResult:
         if not self._turns:
             raise ModelClientError("fake model has no scripted response left")
         return self._turns.pop(0)
+
+
+class _StreamTurnAccumulator:
+    def __init__(self) -> None:
+        self._output_items: dict[int, dict[str, Any]] = {}
+        self._text_chunks: list[str] = []
+
+    def observe(self, event: Any) -> None:
+        event_type = str(_value(event, "type", ""))
+        if event_type == "response.output_item.added":
+            self._set_output_item(_value(event, "output_index"), _value(event, "item"))
+            return
+        if event_type == "response.output_item.done":
+            self._set_output_item(_value(event, "output_index"), _value(event, "item"))
+            return
+        if event_type == "response.output_text.delta":
+            self._text_chunks.append(str(_value(event, "delta", "")))
+            return
+        if event_type == "response.output_text.done":
+            self._set_message_text(
+                output_index=_value(event, "output_index"),
+                content_index=_value(event, "content_index"),
+                text=str(_value(event, "text", "")),
+            )
+            return
+        if event_type == "response.function_call_arguments.delta":
+            self._append_function_call_arguments(
+                output_index=_value(event, "output_index"),
+                delta=str(_value(event, "delta", "")),
+            )
+            return
+        if event_type == "response.function_call_arguments.done":
+            self._set_function_call_arguments(
+                output_index=_value(event, "output_index"),
+                arguments=str(_value(event, "arguments", "")),
+            )
+
+    def build_result(self, response: Any) -> ModelTurnResult:
+        output_items = self._ordered_output_items()
+        response_payload = {
+            "id": _value(response, "id"),
+            "status": _value(response, "status", "completed"),
+            "usage": _value(response, "usage"),
+            "output_text": "".join(self._text_chunks) or _value(response, "output_text", ""),
+            "output": output_items or _item_list(_value(response, "output", [])),
+        }
+        return _normalize_response(response_payload)
+
+    def _ordered_output_items(self) -> list[dict[str, Any]]:
+        return [self._output_items[index] for index in sorted(self._output_items)]
+
+    def _set_output_item(self, output_index: Any, item: Any) -> None:
+        index = _optional_int(output_index)
+        payload = _to_dict(item)
+        if index is None or payload is None:
+            return
+        self._output_items[index] = payload
+
+    def _set_message_text(self, *, output_index: Any, content_index: Any, text: str) -> None:
+        item = self._get_item(output_index)
+        index = _optional_int(content_index)
+        if item is None or item.get("type") != "message" or index is None:
+            return
+
+        content = item.setdefault("content", [])
+        while len(content) <= index:
+            content.append({"type": "output_text", "text": ""})
+        if isinstance(content[index], dict):
+            content[index]["text"] = text
+            content[index].setdefault("type", "output_text")
+
+    def _append_function_call_arguments(self, *, output_index: Any, delta: str) -> None:
+        item = self._get_item(output_index)
+        if item is None or item.get("type") != "function_call":
+            return
+        item["arguments"] = str(item.get("arguments", "")) + delta
+
+    def _set_function_call_arguments(self, *, output_index: Any, arguments: str) -> None:
+        item = self._get_item(output_index)
+        if item is None or item.get("type") != "function_call":
+            return
+        item["arguments"] = arguments
+
+    def _get_item(self, output_index: Any) -> dict[str, Any] | None:
+        index = _optional_int(output_index)
+        if index is None:
+            return None
+        return self._output_items.get(index)
 
 
 def _normalize_response(response: Any) -> ModelTurnResult:
@@ -196,3 +395,30 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_empty_completed_response(result: ModelTurnResult) -> bool:
+    return (
+        result.finish_reason == "completed"
+        and not result.output_text.strip()
+        and not result.tool_calls
+        and not result.output_items
+    )
+
+
+def _empty_completed_response_error(model_name: str, base_url: str | None) -> ModelClientError:
+    backend = base_url or "https://api.openai.com/v1"
+    return ModelClientError(
+        "Responses API returned `completed` with no visible text, no tool calls, "
+        f"and no output items for model `{model_name}` via `{backend}`; "
+        "the configured backend likely does not implement OpenAI Responses text output correctly"
+    )
