@@ -18,6 +18,27 @@
 - live 模式下的写入型工具开放
 - plan mode、subagent、hooks、文件协议化扩展层
 
+## Phase 5 最小闭环验证
+
+当前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 5` 前两点固化成可重复验证用例，边界和学习文档保持一致：
+- 只读闭环：用“读代码并解释”任务验证 live runtime 是否真的按《claude-code-study.md》的 `4. 核心运行循环` 与 `5.3 Memory / Context` 去做 `gather -> search/read_file -> answer`。
+- 写入闭环：用“修复 failing tests 并重跑”任务验证当前最小写入链是否闭环；因为 live 写入工具还没开放，所以这里明确走 README 已声明的 `tool-direct + continue-last + permission rules` 边界，对应学习文档 `4.1 一个最小闭环` 和 `5.5 Safety / Boundaries`。
+
+推荐直接运行：
+
+```bash
+cd reproductions/claude-code
+python -m unittest tests.test_phase5_validation -v
+```
+
+这组测试会验证两条链：
+- `Phase5ReadOnlyValidationTest`：Fake live model 发起 `search -> read_file -> final answer`
+- `Phase5WriteValidationTest`：同一个 session 中依次执行 `bash failing tests -> read_file -> edit -> bash rerun`
+
+当前取舍：
+- 只读验证优先证明 live runtime 的多步工具回灌是通的。
+- 写入验证优先证明“测试失败 -> 修改 -> 重跑”的最小工程闭环已经通了，但仍然是当前 Phase 允许的 deterministic 路径，不伪装成官方 live 写入体验。
+
 ## Phase 1 范围
 
 当前复现只追求 Claude Code 的最小闭环，用来学习它的运行时结构，不追求下面这些内容:
