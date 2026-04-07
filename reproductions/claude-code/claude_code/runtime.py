@@ -18,6 +18,7 @@ from .model_client import ModelClient, ModelClientError
 from .permissions import PermissionGate
 from .session_store import SessionEvent, SessionRecord
 from .tools import (
+    LIVE_TOOL_NAMES,
     READ_ONLY_TOOL_NAMES,
     ToolCall,
     execute_named_tool,
@@ -26,13 +27,6 @@ from .tools import (
     plan_tool_call,
     tool_output_for_model,
 )
-
-
-LIVE_AGENT_PROMPT = """You are a Claude Code cleanroom reproduction agent running in a terminal.
-You may use only these read-only tools: read_file, search, git_status.
-Do not invent file contents or repository facts that you have not inspected.
-Use tools when you need concrete repo information; otherwise answer directly.
-Keep the final answer concise and useful for a terminal user."""
 
 
 @dataclass
@@ -94,11 +88,16 @@ class LoopResult:
         return "\n".join(lines)
 
 
-def gather_context(record: SessionRecord, workspace_root: Path) -> GatherPhaseResult:
+def gather_context(
+    record: SessionRecord,
+    workspace_root: Path,
+    *,
+    allow_controlled_tools: bool = False,
+) -> GatherPhaseResult:
     bundle = build_prompt_context(
         record,
         workspace_root,
-        base_instructions=LIVE_AGENT_PROMPT,
+        base_instructions=_build_live_agent_prompt(allow_controlled_tools=allow_controlled_tools),
     )
     return GatherPhaseResult(
         latest_task=bundle.latest_task,
@@ -138,6 +137,8 @@ def act_on_context(
         workspace_root,
         model_client=model_client,
         max_steps=max_steps,
+        permission_gate=permission_gate,
+        checkpoint_store=checkpoint_store,
     )
 
 
@@ -202,17 +203,21 @@ def _act_via_live_agent(
     *,
     model_client: ModelClient,
     max_steps: int,
+    permission_gate: PermissionGate | None = None,
+    checkpoint_store: CheckpointStore | None = None,
 ) -> tuple[ActPhaseResult, list[SessionEvent]]:
     emitted: list[SessionEvent] = []
     executed_tools: list[str] = []
     running_input = [_build_initial_user_input(gathered)]
+    include_controlled_tools = permission_gate is not None
+    live_tool_names = LIVE_TOOL_NAMES if include_controlled_tools else READ_ONLY_TOOL_NAMES
 
     for step_index in range(1, max_steps + 1):
         try:
             turn = model_client.create_response(
                 instructions=gathered.prompt_instructions,
                 input_items=running_input,
-                tools=live_tool_schemas(),
+                tools=live_tool_schemas(include_controlled_tools=include_controlled_tools),
             )
         except ModelClientError as exc:
             return (
@@ -233,7 +238,7 @@ def _act_via_live_agent(
         if turn.tool_calls:
             running_input.extend(turn.output_items)
             for call in turn.tool_calls:
-                if call.name not in READ_ONLY_TOOL_NAMES:
+                if call.name not in live_tool_names:
                     return (
                         ActPhaseResult(
                             mode="live",
@@ -249,7 +254,13 @@ def _act_via_live_agent(
                         emitted,
                     )
 
-                result = execute_named_tool(call.name, call.arguments, workspace_root)
+                result = execute_named_tool(
+                    call.name,
+                    call.arguments,
+                    workspace_root,
+                    permission_gate=permission_gate,
+                    checkpoint_store=checkpoint_store,
+                )
                 executed_tools.append(call.name)
                 emitted.append(
                     record.add_tool_call(
@@ -336,6 +347,25 @@ def _build_initial_user_input(gathered: GatherPhaseResult) -> dict[str, Any]:
     }
 
 
+def _build_live_agent_prompt(*, allow_controlled_tools: bool) -> str:
+    lines = [
+        "You are a Claude Code cleanroom reproduction agent running in a terminal.",
+        "You may use read-only tools read_file, search, and git_status.",
+    ]
+    if allow_controlled_tools:
+        lines.append(
+            "You may also use edit and bash when necessary; those controlled tools are subject to permission rules and may be denied."
+        )
+    lines.extend(
+        [
+            "Do not invent file contents or repository facts that you have not inspected.",
+            "Use tools when you need concrete repo information; otherwise answer directly.",
+            "Keep the final answer concise and useful for a terminal user.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def verify_action(gathered: GatherPhaseResult, acted: ActPhaseResult) -> VerifyPhaseResult:
     if not gathered.latest_task.strip():
         return VerifyPhaseResult(
@@ -389,7 +419,11 @@ def run_core_loop(
     permission_gate: PermissionGate | None = None,
     checkpoint_store: CheckpointStore | None = None,
 ) -> LoopResult:
-    gathered = gather_context(record, workspace_root)
+    gathered = gather_context(
+        record,
+        workspace_root,
+        allow_controlled_tools=not tool_direct and permission_gate is not None,
+    )
     acted, emitted_events = act_on_context(
         gathered,
         record,

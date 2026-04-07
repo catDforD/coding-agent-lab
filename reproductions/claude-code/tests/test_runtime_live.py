@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from claude_code.checkpoints import CheckpointStore
 from claude_code.model_client import FakeModelClient, ModelTurnResult, ToolRequest
+from claude_code.permissions import InteractivePermissionGate
 from claude_code.runtime import run_core_loop
 from claude_code.session_store import SessionRecord, utc_now_iso
 
@@ -188,6 +190,133 @@ class LiveRuntimeTest(unittest.TestCase):
             self.assertEqual(result.verify.status, "invalid-tool-call")
             self.assertEqual(result.act.executed_tools, [])
             self.assertEqual(result.emitted_events, [])
+
+    def test_live_agent_can_edit_with_permission_gate_and_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_root = Path(tmp_dir)
+            workspace_root = temp_root / "workspace"
+            workspace_root.mkdir()
+            self.make_workspace(workspace_root)
+            record = self.make_record("请把 sample.txt 里的 beta 改成 gamma")
+            client = FakeModelClient(
+                [
+                    ModelTurnResult(
+                        response_id="resp-1",
+                        output_text="",
+                        tool_calls=[
+                            ToolRequest(
+                                call_id="call-1",
+                                name="edit",
+                                arguments={
+                                    "path": "src/sample.txt",
+                                    "old_text": "beta",
+                                    "new_text": "gamma",
+                                },
+                            )
+                        ],
+                        output_items=[
+                            {
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "name": "edit",
+                                "arguments": (
+                                    "{\"path\": \"src/sample.txt\", "
+                                    "\"old_text\": \"beta\", \"new_text\": \"gamma\"}"
+                                ),
+                            }
+                        ],
+                        finish_reason="tool_calls",
+                        usage=None,
+                    ),
+                    ModelTurnResult(
+                        response_id="resp-2",
+                        output_text="sample.txt 已更新。",
+                        tool_calls=[],
+                        output_items=[],
+                        finish_reason="completed",
+                        usage={"total_tokens": 28},
+                    ),
+                ]
+            )
+            checkpoint_store = CheckpointStore(temp_root / "state" / "checkpoints")
+            permission_gate = InteractivePermissionGate(input_fn=lambda _: "yes")
+
+            result = run_core_loop(
+                record,
+                workspace_root,
+                tool_direct=False,
+                max_steps=6,
+                model_client=client,
+                permission_gate=permission_gate,
+                checkpoint_store=checkpoint_store,
+            )
+
+            self.assertEqual(result.verify.status, "completed")
+            self.assertEqual(result.act.executed_tools, ["edit"])
+            self.assertEqual(
+                (workspace_root / "src" / "sample.txt").read_text(encoding="utf-8"),
+                "alpha\ngamma\n",
+            )
+            self.assertTrue((temp_root / "state" / "checkpoints" / "latest_edit.json").exists())
+            second_request_items = client.requests[1]["input_items"]
+            self.assertEqual(second_request_items[2]["type"], "function_call_output")
+            self.assertIn("\"status\": \"ok\"", second_request_items[2]["output"])
+            self.assertIn("edit and bash", client.requests[0]["instructions"])
+
+    def test_live_agent_can_run_bash_with_permission_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace_root = Path(tmp_dir)
+            self.make_workspace(workspace_root)
+            record = self.make_record("请运行命令并返回结果")
+            client = FakeModelClient(
+                [
+                    ModelTurnResult(
+                        response_id="resp-1",
+                        output_text="",
+                        tool_calls=[
+                            ToolRequest(
+                                call_id="call-1",
+                                name="bash",
+                                arguments={"command": "printf ready"},
+                            )
+                        ],
+                        output_items=[
+                            {
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "name": "bash",
+                                "arguments": "{\"command\": \"printf ready\"}",
+                            }
+                        ],
+                        finish_reason="tool_calls",
+                        usage=None,
+                    ),
+                    ModelTurnResult(
+                        response_id="resp-2",
+                        output_text="命令输出是 ready。",
+                        tool_calls=[],
+                        output_items=[],
+                        finish_reason="completed",
+                        usage={"total_tokens": 24},
+                    ),
+                ]
+            )
+            permission_gate = InteractivePermissionGate(input_fn=lambda _: "y")
+
+            result = run_core_loop(
+                record,
+                workspace_root,
+                tool_direct=False,
+                max_steps=6,
+                model_client=client,
+                permission_gate=permission_gate,
+            )
+
+            self.assertEqual(result.verify.status, "completed")
+            self.assertEqual(result.act.executed_tools, ["bash"])
+            second_request_items = client.requests[1]["input_items"]
+            self.assertIn("\"command\": \"printf ready\"", second_request_items[2]["output"])
+            self.assertIn("\"stdout\": \"ready\"", second_request_items[2]["output"])
 
     def test_live_agent_stops_at_max_steps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

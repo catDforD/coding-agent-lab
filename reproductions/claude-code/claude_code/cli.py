@@ -90,12 +90,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         status, record = create_or_resume_session(args, service)
-        permission_gate = None
-        if args.tool_direct:
-            # CLI 参数 -> 独立规则模块 -> permission gate -> runtime/tool 层。
-            # 这里先只做最小文件配置加载，后续再扩成更完整的 settings hierarchy。
-            rule_set = load_permission_rules(service.workspace)
-            permission_gate = InteractivePermissionGate(rule_set=rule_set)
+        # CLI 参数 -> 独立规则模块 -> permission gate -> runtime/tool 层。
+        # 统一给 live/tool-direct 复用同一套 gate，这样受控工具的边界不会只停留在调试路径。
+        rule_set = load_permission_rules(service.workspace)
+        permission_gate = InteractivePermissionGate(rule_set=rule_set)
     except (FileNotFoundError, PermissionRulesError, ValueError) as exc:
         parser.error(str(exc))
 

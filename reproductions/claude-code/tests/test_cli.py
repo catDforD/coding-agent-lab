@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -7,6 +9,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from claude_code import cli
+from claude_code.runtime import ActPhaseResult, GatherPhaseResult, LoopResult, VerifyPhaseResult
+from claude_code.session_store import SessionEvent, SessionRecord, utc_now_iso
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -68,6 +75,17 @@ class CliEntryTest(unittest.TestCase):
             encoding="utf-8",
         )
         return path
+
+    def make_record(self, task: str) -> SessionRecord:
+        now = utc_now_iso()
+        record = SessionRecord(
+            session_id="cli-test-session",
+            created_at=now,
+            updated_at=now,
+            events=[],
+        )
+        record.add_user_message(task)
+        return record
 
     def test_read_file_tool_records_file_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -458,6 +476,66 @@ class CliEntryTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn("missing OPENAI_API_KEY", result.stderr)
+
+    def test_live_cli_attaches_permission_gate_to_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace_root = Path(tmp_dir)
+            self.make_workspace(workspace_root)
+
+            class FakeService:
+                def __init__(self, workspace: Path, record: SessionRecord) -> None:
+                    self.workspace = workspace
+                    self.record = record
+                    self.permission_gate = None
+
+                def create_session(self, task: str) -> SessionRecord:
+                    self.record = CliEntryTest.make_record(self, task)
+                    return self.record
+
+                def run_turn(
+                    self,
+                    record: SessionRecord,
+                    *,
+                    tool_direct: bool,
+                    max_steps: int,
+                    permission_gate=None,
+                ) -> LoopResult:
+                    self.permission_gate = permission_gate
+                    return LoopResult(
+                        gather=GatherPhaseResult(
+                            latest_task=record.user_tasks[-1]["content"],
+                            recent_tasks=[],
+                            resume_transcript="",
+                            recent_tool_outputs="",
+                            prompt_instructions="",
+                            prompt_input_text="",
+                            summary="ok",
+                        ),
+                        act=ActPhaseResult(
+                            mode="live",
+                            strategy="live-responses-agent",
+                            model="fake-live",
+                            step_count=1,
+                            executed_tools=[],
+                            finish_reason="completed",
+                            status="ok",
+                            final_output="done",
+                            summary="ok",
+                        ),
+                        verify=VerifyPhaseResult(status="completed", summary="ok"),
+                        emitted_events=[],
+                    )
+
+            fake_service = FakeService(workspace_root, self.make_record("placeholder"))
+            with (
+                patch.object(cli.ClaudeCodeAppService, "for_current_workspace", return_value=fake_service),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                exit_code = cli.main(["请解释 notes.md"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertIsNotNone(fake_service.permission_gate)
 
 
 if __name__ == "__main__":
