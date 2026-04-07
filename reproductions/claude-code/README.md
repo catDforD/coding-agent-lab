@@ -7,7 +7,7 @@
 ## 当前状态
 
 截至 `2026-03-28`，当前 cleanroom 复现已经具备下面这些稳定基线：
-- 真实 Responses API 驱动的最小 live 只读 agent 闭环。
+- 真实 Responses API 驱动的最小 live agent 闭环，当前已可在 CLI 下受控使用 `read_file`、`search`、`git_status`、`edit`、`bash`。
 - 统一 session 事件流，以及 `--continue-last` / `--session-id` 会话续跑。
 - `CLAUDE.md`、用户规则、`MEMORY.md` 前 200 行的统一加载。
 - “旧工具输出优先裁掉，再摘要更老会话”的最小 deterministic compaction。
@@ -15,14 +15,13 @@
 
 当前仍未完成的核心模块：
 - checkpoint / undo
-- live 模式下的写入型工具开放
 - plan mode、subagent、hooks、文件协议化扩展层
 
 ## Phase 5 最小闭环验证
 
 当前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 5` 前两点固化成可重复验证用例，边界和学习文档保持一致：
 - 只读闭环：用“读代码并解释”任务验证 live runtime 是否真的按《claude-code-study.md》的 `4. 核心运行循环` 与 `5.3 Memory / Context` 去做 `gather -> search/read_file -> answer`。
-- 写入闭环：用“修复 failing tests 并重跑”任务验证当前最小写入链是否闭环；因为 live 写入工具还没开放，所以这里明确走 README 已声明的 `tool-direct + continue-last + permission rules` 边界，对应学习文档 `4.1 一个最小闭环` 和 `5.5 Safety / Boundaries`。
+- 写入闭环：用“修复 failing tests 并重跑”任务验证当前最小写入链是否闭环；这组验证仍然固定走 `tool-direct + continue-last + permission rules` 的 deterministic 路径，对应学习文档 `4.1 一个最小闭环` 和 `5.5 Safety / Boundaries`。
 
 推荐直接运行：
 
@@ -123,8 +122,8 @@ reproductions/claude-code/
 - 当前会把 gather 摘要、模型模式、步数、工具执行情况、最终回答和 verify 结果打印到终端
 
 当前的 cleanroom 取舍是:
-- live 模式先只开放只读工具 `read_file`、`search`、`git_status`
-- `edit` 和 `bash` 仍然只在 `--tool-direct` 下可用；其中 `edit` 现在会在真正写入前保存最近一次 checkpoint，便于最小 undo 闭环验证
+- live 模式默认开放 `read_file`、`search`、`git_status`
+- 在 CLI 附带 permission gate 时，live 模式也允许模型请求 `edit` 和 `bash`；其中 `edit` 会在真正写入前保存最近一次 checkpoint
 
 ### 当前 control layer 边界
 
@@ -132,7 +131,7 @@ Phase 4 当前已补上三条最小控制链：
 - permission gate
 - 只拦截高风险工具 `edit` 和 `bash`
 - 会先读取独立的 allowlist / denylist 配置；命中 denylist 直接拒绝，命中 allowlist 直接放行
-- 规则没命中时，才在 CLI 的 `--tool-direct` 路径里做同步终端确认
+- 规则没命中时，才在 CLI 的 live / `--tool-direct` 路径里做同步终端确认
 - 用户输入 `y` / `yes` 才执行；其他输入或没有确认时一律拒绝
 - 自动放行 / 自动拒绝 / 手动确认的结果都会继续写入统一事件流，便于后续接 hooks
 
@@ -142,7 +141,6 @@ Phase 4 当前已补上三条最小控制链：
 - checkpoint 先和 session store 共用同一个 state dir，避免控制层状态散落到 workspace 里
 
 当前还没有做的部分：
-- live 模式下的写入工具开放
 - Web UI 里的确认交互
 - 更完整的 settings hierarchy、managed settings 和 hooks 联动
 
@@ -186,7 +184,7 @@ CLI 参数 -> session store.events -> runtime.gather_context
 - `rules`: 启动时会从 workspace 向上查找 `CLAUDE.md`，读取用户级规则文件，并读取 workspace 下 `MEMORY.md` 的前 200 行
 - `context builder`: 首轮 live 输入会统一拼接当前任务、规则文件、最近会话历史和最近工具输出
 - `compaction`: 旧工具输出优先不再原样进入 transcript，更老的会话会收成一段 deterministic 摘要；最近少量工具结果仍单独保留原文
-- `act/live`: 通过 Responses API 让模型决定是否调用只读工具，并在多轮 `function_call -> function_call_output` 后返回最终答案
+- `act/live`: 通过 Responses API 让模型决定是否调用工具；CLI 附带 permission gate 时还可受控调用 `edit` / `bash`
 - `act/tool-direct`: 把任务文本折叠成显式工具调用，作为 deterministic/debug 入口
 - `permission_rules`: 从独立 JSON 文件读取 `bash` / `edit` 的 allowlist / denylist，避免把控制配置写死在 runtime 里
 - `checkpoint`: `edit` 写入前先落最近一次备份，`undo_last_edit` 再从同一份备份恢复
@@ -389,6 +387,6 @@ uv run python -m claude_code "搜索 SessionStore"
 
 当前仍然保留几个明确边界:
 - live 模式已经有 `CLAUDE.md` / `MEMORY.md` / 最小 compaction，但还没有更细的 relevance packing、缓存和策略切换。
-- live 模式不开放 `edit` 和 `bash`。
+- Web UI 路径目前还没有确认交互，所以 live 写入工具只在 CLI 上开放。
 - checkpoint 当前只保留最近一次 `edit` 的原文快照，还不是完整撤销栈。
 - tool-direct 仍然是调试入口，不是最终的 Claude Code 风格交互。

@@ -19,6 +19,7 @@ runtime 解析任务文本 -> ToolCall -> execute_tool_call -> 文件系统 / su
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from .checkpoints import CheckpointStore
 from .permissions import CONTROLLED_TOOL_NAMES, PermissionDecision, PermissionGate
 
 READ_ONLY_TOOL_NAMES = ("read_file", "search", "git_status")
+LIVE_TOOL_NAMES = READ_ONLY_TOOL_NAMES + CONTROLLED_TOOL_NAMES
 
 
 @dataclass
@@ -243,8 +245,8 @@ def execute_named_tool(
     return result
 
 
-def live_tool_schemas() -> list[dict[str, Any]]:
-    return [
+def live_tool_schemas(*, include_controlled_tools: bool = False) -> list[dict[str, Any]]:
+    schemas = [
         {
             "type": "function",
             "name": "read_file",
@@ -288,6 +290,54 @@ def live_tool_schemas() -> list[dict[str, Any]]:
             },
         },
     ]
+    if not include_controlled_tools:
+        return schemas
+
+    schemas.extend(
+        [
+            {
+                "type": "function",
+                "name": "edit",
+                "description": "Replace one text snippet in a UTF-8 file inside the current workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file, relative to the workspace root.",
+                        },
+                        "old_text": {
+                            "type": "string",
+                            "description": "Existing text to replace exactly once.",
+                        },
+                        "new_text": {
+                            "type": "string",
+                            "description": "Replacement text for the first matching occurrence.",
+                        },
+                    },
+                    "required": ["path", "old_text", "new_text"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "bash",
+                "description": "Run one shell command inside the current workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Shell command to execute with zsh -lc.",
+                        }
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+            },
+        ]
+    )
+    return schemas
 
 
 def _attach_permission_metadata(tool_output: dict[str, Any], decision: PermissionDecision) -> None:
@@ -412,12 +462,14 @@ def _run_edit(
         raise ValueError("edit requires a non-empty old_text")
 
     original = path.read_text(encoding="utf-8")
+    original_stat = path.stat()
     if old_text not in original:
         raise ValueError("old_text not found in target file")
 
     updated = original.replace(old_text, new_text, 1)
     checkpoint = checkpoint_store.save_latest_edit(workspace_root, path, original)
     path.write_text(updated, encoding="utf-8")
+    _ensure_python_sees_fresh_source(path, original_stat.st_mtime_ns, len(original), len(updated))
     relative_path = str(path.relative_to(workspace_root.resolve()))
     return ToolExecutionResult(
         status="ok",
@@ -518,3 +570,27 @@ def _run_git_status(workspace_root: Path, tool_input: dict[str, Any]) -> ToolExe
         assistant_message="已收集当前工作区状态，可以据此决定是否继续修改或验证。",
         summary="collected git status",
     )
+
+
+def _ensure_python_sees_fresh_source(
+    path: Path,
+    original_mtime_ns: int,
+    original_size: int,
+    updated_size: int,
+) -> None:
+    """避免 Python 在快速同长度改动后继续复用旧字节码。
+
+    Phase 5 的最小闭环里经常出现“edit 后立刻 rerun unittest”。
+    如果源码在同一秒内被改写且文件长度没变，CPython 可能仍然接受旧的 pyc。
+    这里在这种边界下主动把 mtime 推到下一秒，保证后续命令看到的是新源码。
+    """
+
+    if original_size != updated_size:
+        return
+
+    updated_stat = path.stat()
+    if updated_stat.st_mtime_ns // 1_000_000_000 != original_mtime_ns // 1_000_000_000:
+        return
+
+    bumped_mtime_ns = ((original_mtime_ns // 1_000_000_000) + 1) * 1_000_000_000
+    os.utime(path, ns=(updated_stat.st_atime_ns, bumped_mtime_ns))
