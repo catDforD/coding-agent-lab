@@ -11,6 +11,18 @@ from .permissions import InteractivePermissionGate
 from .session_store import SessionRecord
 
 
+class _LiveTextPrinter:
+    def __init__(self) -> None:
+        self.wrote_text = False
+
+    def __call__(self, delta: str) -> None:
+        if not delta:
+            return
+        sys.stdout.write(delta)
+        sys.stdout.flush()
+        self.wrote_text = True
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="claude-code",
@@ -98,17 +110,33 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     try:
+        live_text_printer = None if args.tool_direct else _LiveTextPrinter()
         loop_result = service.run_turn(
             record,
             tool_direct=args.tool_direct,
             max_steps=args.max_steps,
             permission_gate=permission_gate,
+            text_delta_callback=live_text_printer,
         )
     except RuntimeUnavailableError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    print("\n".join([render_summary(status, record), loop_result.render_summary()]))
+    if live_text_printer is not None and live_text_printer.wrote_text:
+        print()
+
+    print(
+        "\n".join(
+            [
+                render_summary(status, record),
+                loop_result.render_summary(
+                    include_assistant_response=not (
+                        live_text_printer is not None and live_text_printer.wrote_text
+                    )
+                ),
+            ]
+        )
+    )
 
     if loop_result.verify.status == "completed":
         return 0

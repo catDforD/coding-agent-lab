@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .checkpoints import CheckpointStore
 from .config import ConfigError, load_openai_settings, workspace_root
@@ -113,6 +113,7 @@ class ClaudeCodeAppService:
         tool_direct: bool,
         max_steps: int,
         permission_gate: PermissionGate | None = None,
+        text_delta_callback: Callable[[str], None] | None = None,
     ) -> LoopResult:
         model_client = None
         if not tool_direct:
@@ -126,6 +127,7 @@ class ClaudeCodeAppService:
             model_client=model_client,
             permission_gate=permission_gate,
             checkpoint_store=self.checkpoints,
+            text_delta_callback=text_delta_callback,
         )
         self.store.save(record)
         return loop_result
