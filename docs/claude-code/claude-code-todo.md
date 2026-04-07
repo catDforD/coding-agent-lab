@@ -34,8 +34,8 @@
 - [x] 把 allowlist / denylist 配置做成单独模块，避免以后和 runtime 耦合。见“5.5 Safety / Boundaries”。落实见 [reproductions/claude-code/claude_code/permission_rules.py](../../reproductions/claude-code/claude_code/permission_rules.py)、[reproductions/claude-code/claude_code/permissions.py](../../reproductions/claude-code/claude_code/permissions.py)、[reproductions/claude-code/claude_code/cli.py](../../reproductions/claude-code/claude_code/cli.py)、[reproductions/claude-code/tests/test_cli.py](../../reproductions/claude-code/tests/test_cli.py) 和 [reproductions/claude-code/README.md](../../reproductions/claude-code/README.md)。
 
 ## Phase 5. 验证最小闭环
-- [ ] 用一个“读代码并解释”的任务验证只读闭环。见“4. 核心运行循环”。
-- [ ] 用一个“修复测试失败并重跑”的任务验证写入闭环。见“4.1 一个最小闭环”。
+- [x] 用一个“读代码并解释”的任务验证只读闭环。见“4. 核心运行循环”。验证见 `reproductions/claude-code/tests/test_phase5_validation.py::Phase5ReadOnlyValidationTest`。
+- [x] 用一个“修复测试失败并重跑”的任务验证写入闭环。见“4.1 一个最小闭环”。验证见 `reproductions/claude-code/tests/test_phase5_validation.py::Phase5WriteValidationTest`。
 - [ ] 记录至少一个失败样例，说明是检索、上下文、权限还是工具反馈出了问题。见“8. 评测、效果与局限”。
 
 ## Phase 6. 增强到 Claude Code 风格
