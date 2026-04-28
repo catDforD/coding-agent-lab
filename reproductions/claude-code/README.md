@@ -11,17 +11,19 @@
 - 统一 session 事件流，以及 `--continue-last` / `--session-id` 会话续跑。
 - `CLAUDE.md`、用户规则、`MEMORY.md` 前 200 行的统一加载。
 - “旧工具输出优先裁掉，再摘要更老会话”的最小 deterministic compaction。
+- 最小控制层：`edit` / `bash` permission gate、allowlist / denylist 规则模块、最近一次 `edit` checkpoint / undo。
+- Phase 5 最小闭环验证，包括只读闭环、写入闭环和一个权限失败样例记录。
 - 基础 Web UI 工作台，用来查看 session、继续会话和检查本轮 `gather -> act -> verify` 摘要。
 
 当前仍未完成的核心模块：
-- checkpoint / undo
 - plan mode、subagent、hooks、文件协议化扩展层
 
 ## Phase 5 最小闭环验证
 
-当前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 5` 前两点固化成可重复验证用例，边界和学习文档保持一致：
+当前已经把 `docs/claude-code/claude-code-todo.md` 的 `Phase 5` 三项收尾，边界和学习文档保持一致：
 - 只读闭环：用“读代码并解释”任务验证 live runtime 是否真的按《claude-code-study.md》的 `4. 核心运行循环` 与 `5.3 Memory / Context` 去做 `gather -> search/read_file -> answer`。
 - 写入闭环：用“修复 failing tests 并重跑”任务验证当前最小写入链是否闭环；这组验证仍然固定走 `tool-direct + continue-last + permission rules` 的 deterministic 路径，对应学习文档 `4.1 一个最小闭环` 和 `5.5 Safety / Boundaries`。
+- 失败样例记录：见 [docs/claude-code/claude-code-failure-cases.md](../../docs/claude-code/claude-code-failure-cases.md)。当前先固定记录一个“permission denylist 让 bash 在 act 阶段被拦住”的样例，用来区分控制层拦截和检索/上下文失效。
 
 推荐直接运行：
 
